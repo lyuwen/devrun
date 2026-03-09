@@ -1,0 +1,20 @@
+# Executor configuration for devrun
+# Each key is an executor name referenced in task configs.
+
+local:
+  type: local
+
+slurm_cluster_a:
+  type: slurm
+  host: cluster-a.company.com
+  user: dev
+  partition: gpu
+
+ssh_dev:
+  type: ssh
+  host: dev-server.company.com
+  user: dev
+
+inference_cluster:
+  type: http
+  endpoint: https://inference.cluster/api

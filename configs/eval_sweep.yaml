@@ -1,0 +1,14 @@
+# Parameter sweep: evaluate multiple models × batch sizes
+task: eval
+executor: local
+
+params:
+  dataset: math500
+
+sweep:
+  model:
+    - deepseek-r1
+    - qwen-72b
+  batch_size:
+    - 8
+    - 16

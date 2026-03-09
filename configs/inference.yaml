@@ -1,0 +1,8 @@
+# Run inference on a prompt file
+task: inference
+executor: local
+
+params:
+  input_file: prompts.jsonl
+  temperature: 0.7
+  max_tokens: 2048

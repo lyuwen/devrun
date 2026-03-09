@@ -1,0 +1,10 @@
+# Evaluate a model on the MATH-500 benchmark
+task: eval
+executor: local
+
+params:
+  model: deepseek-r1
+  dataset: math500
+  batch_size: 16
+  nodes: 2
+  gpus_per_node: 8
