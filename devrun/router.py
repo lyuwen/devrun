@@ -19,9 +19,11 @@ _DEFAULT_EXECUTORS_FILE = "configs/executors.yaml"
 
 def _find_executors_file() -> Path:
     """Search for executors.yaml in common locations."""
+    devrun_repo_root = Path(__file__).parent.parent
     candidates = [
         Path(_DEFAULT_EXECUTORS_FILE),
         Path.cwd() / "executors.yaml",
+        devrun_repo_root / "configs" / "executors.yaml",
         Path.home() / ".devrun" / "executors.yaml",
     ]
     for p in candidates:

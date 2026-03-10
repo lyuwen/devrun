@@ -27,7 +27,14 @@ class TaskRunner:
         self._executors_path = executors_path
         self._executor_configs = None  # lazy
         self._db = JobStore(db_path)
-        self._config_dirs = [Path.cwd() / "configs", Path.home() / ".devrun" / "configs"]
+        # We need a stable reference to the installed repository's config directory.
+        # This allows devrun to be executed from anywhere while still finding default templates.
+        devrun_repo_root = Path(__file__).parent.parent
+        self._config_dirs = [
+            Path.cwd() / "configs",
+            devrun_repo_root / "configs",
+            Path.home() / ".devrun" / "configs"
+        ]
 
     # ---- lazy config loading ---------------------------------------------
 
@@ -90,8 +97,8 @@ class TaskRunner:
         if not record:
             return {"error": f"Job {job_id} not found"}
 
-        # If still active, query executor for live status
-        if record.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING):
+        # If still active (or unknown), query executor for live status
+        if record.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING, JobStatus.UNKNOWN):
             try:
                 executor = resolve_executor(record.executor, self.executor_configs)
                 remote_id = record.remote_job_id or job_id
