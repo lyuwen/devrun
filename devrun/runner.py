@@ -27,6 +27,7 @@ class TaskRunner:
         self._executors_path = executors_path
         self._executor_configs = None  # lazy
         self._db = JobStore(db_path)
+        self._config_dirs = [Path.cwd() / "configs", Path.home() / ".devrun" / "configs"]
 
     # ---- lazy config loading ---------------------------------------------
 
@@ -38,15 +39,48 @@ class TaskRunner:
 
     # ---- public API ------------------------------------------------------
 
-    def run(self, config_path: str) -> list[str]:
-        """Parse a task YAML, expand sweeps, submit all jobs. Returns list of job_ids."""
-        cfg = self._load_config(config_path)
+    def _find_configs(self, target: str) -> list[Path]:
+        """Resolve a target name to config file paths across all search directories.
+
+        Returns all matching configs in priority order (first = lowest priority).
+        The merge strategy is: project template → user config → CLI overrides.
+        """
+        p = Path(target)
+        if p.is_file():
+            return [p]
+
+        # Parse target into task_name and variation
+        parts = target.split("/", 1)
+        task_name = parts[0]
+        variation = parts[1] if len(parts) > 1 else "default"
+        filename = f"{variation}.yaml"
+
+        found: list[Path] = []
+        for search_dir in self._config_dirs:
+            candidate = search_dir / task_name / filename
+            if candidate.is_file():
+                found.append(candidate)
+
+        if not found:
+            raise FileNotFoundError(
+                f"Config for '{target}' not found. Searched for '{task_name}/{filename}' in: "
+                + ", ".join(str(d) for d in self._config_dirs)
+            )
+
+        return found
+
+    def run(self, target: str, overrides: list[str] | None = None, dry_run: bool = False) -> list[str]:
+        """Parse a task YAML, apply overrides, expand sweeps, submit all jobs. Returns list of job_ids."""
+        cfg = self._load_config(target, overrides)
         param_combos = self._expand_sweep(cfg)
         job_ids: list[str] = []
 
         for params in param_combos:
-            job_id = self._submit_single(cfg.task, cfg.executor, params)
-            job_ids.append(job_id)
+            if dry_run:
+                logger.info("DRY RUN: Would submit task='%s', executor='%s', params=%s", cfg.task, cfg.executor, params)
+            else:
+                job_id = self._submit_single(cfg.task, cfg.executor, params)
+                job_ids.append(job_id)
 
         return job_ids
 
@@ -99,10 +133,22 @@ class TaskRunner:
 
     # ---- internal --------------------------------------------------------
 
-    @staticmethod
-    def _load_config(config_path: str) -> TaskConfig:
-        with open(config_path) as fh:
-            raw = yaml.safe_load(fh)
+    def _load_config(self, target: str, overrides: list[str] | None = None) -> TaskConfig:
+        from omegaconf import OmegaConf
+
+        config_paths = self._find_configs(target)
+        logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
+
+        # Merge all configs in order (first = base, last = highest priority)
+        merged_cfg = OmegaConf.load(config_paths[0])
+        for extra_path in config_paths[1:]:
+            merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.load(extra_path))
+
+        # CLI overrides have the highest priority
+        if overrides:
+            merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.from_dotlist(overrides))
+
+        raw = OmegaConf.to_container(merged_cfg, resolve=True)
         return TaskConfig(**raw)
 
     @staticmethod

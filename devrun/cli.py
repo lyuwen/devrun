@@ -51,18 +51,31 @@ def _runner() -> TaskRunner:
 # ---------------------------------------------------------------------------
 
 
-@app.command()
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
 def run(
-    config: str = typer.Argument(..., help="Path to task YAML config file"),
+    ctx: typer.Context,
+    target: str = typer.Argument(..., help="Config path, task, or task/variation"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Prepare job without actually executing it"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
-    """Submit a task defined by a YAML configuration file."""
+    """Submit a task using a config file or variation. Trailing arguments are passed as OmegaConf overrides."""
     _setup_logging(verbose)
     runner = _runner()
+    
+    # Any trailing arguments will be passed as overrides
+    overrides = ctx.args
+    if overrides:
+        console.print(f"[dim]Using overrides: {overrides}[/dim]")
+        
     try:
-        job_ids = runner.run(config)
-        for jid in job_ids:
-            console.print(f"[green]✓[/green] Job submitted: [bold]{jid}[/bold]")
+        job_ids = runner.run(target, overrides=overrides, dry_run=dry_run)
+        if dry_run:
+            console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
+        else:
+            for jid in job_ids:
+                console.print(f"[green]✓[/green] Job submitted: [bold]{jid}[/bold]")
     except Exception as exc:
         console.print(f"[red]✗ Error:[/red] {exc}")
         raise typer.Exit(code=1)

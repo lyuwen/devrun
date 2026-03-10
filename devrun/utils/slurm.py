@@ -16,10 +16,13 @@ def generate_sbatch_script(
     nodes: int = 1,
     gpus_per_node: int | None = None,
     cpus_per_task: int | None = None,
+    mem: str | None = None,
     partition: str | None = None,
     walltime: str = "04:00:00",
     env: dict[str, str] | None = None,
     extra_sbatch: list[str] | None = None,
+    working_dir: str | None = None,
+    setup_commands: list[str] | None = None,
 ) -> str:
     """Return a complete ``#!/bin/bash`` SLURM batch script."""
     lines: list[str] = ["#!/bin/bash"]
@@ -29,6 +32,8 @@ def generate_sbatch_script(
         lines.append(f"#SBATCH --gres=gpu:{gpus_per_node}")
     if cpus_per_task:
         lines.append(f"#SBATCH --cpus-per-task={cpus_per_task}")
+    if mem:
+        lines.append(f"#SBATCH --mem={mem}")
     if partition:
         lines.append(f"#SBATCH --partition={partition}")
     lines.append(f"#SBATCH --time={walltime}")
@@ -40,12 +45,24 @@ def generate_sbatch_script(
 
     lines.append("")
 
+    # Setup commands (conda init, etc.)
+    for cmd in setup_commands or []:
+        lines.append(cmd)
+    if setup_commands:
+        lines.append("")
+
     # Export env vars
     for key, val in (env or {}).items():
         lines.append(f"export {key}={val}")
     if env:
         lines.append("")
 
+    # Change to working directory if specified
+    if working_dir:
+        lines.append(f"cd {working_dir}")
+        lines.append("")
+
+    lines.append("set -ex")
     lines.append(command)
     lines.append("")
     return "\n".join(lines)

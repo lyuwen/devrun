@@ -4,11 +4,25 @@
 local:
   type: local
 
-slurm_cluster_a:
+# Local SLURM (no SSH, sbatch runs on this machine)
+slurm:
   type: slurm
-  host: cluster-a.company.com
-  user: dev
-  partition: gpu
+  partition: agent
+  extra:
+    setup_commands:
+      - # source /path/to/conda/activate
+      - # conda activate myenv
+    mem: 32G
+    cpus_per_task: 4
+    extra_sbatch:
+      - --oversubscribe
+
+# Remote SLURM via SSH (template, fill in host/user)
+# slurm_remote:
+#   type: slurm
+#   host: cluster-a.company.com
+#   user: dev
+#   partition: gpu
 
 ssh_dev:
   type: ssh
