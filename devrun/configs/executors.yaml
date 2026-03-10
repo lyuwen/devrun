@@ -9,9 +9,10 @@ slurm:
   type: slurm
   partition: agent
   extra:
-    setup_commands:
-      - # source /path/to/conda/activate
-      - # conda activate myenv
+    # Commands run before the main task is executed (e.g. activating environments)
+    # setup_commands:
+    #   - source /path/to/conda/activate
+    #   - conda activate myenv
     mem: 32G
     cpus_per_task: 4
     extra_sbatch:

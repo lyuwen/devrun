@@ -31,9 +31,9 @@ class TaskRunner:
         # This allows devrun to be executed from anywhere while still finding default templates.
         devrun_repo_root = Path(__file__).parent.parent
         self._config_dirs = [
-            Path.cwd() / ".devrun" / "configs",
             devrun_repo_root / "devrun" / "configs",
-            Path.home() / ".devrun" / "configs"
+            Path.home() / ".devrun" / "configs",
+            Path.cwd() / ".devrun" / "configs"
         ]
 
     # ---- lazy config loading ---------------------------------------------

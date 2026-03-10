@@ -14,17 +14,13 @@ from devrun.registry import get_executor_class
 
 logger = logging.getLogger("devrun.router")
 
-_DEFAULT_EXECUTORS_FILE = ".devrun/executors.yaml"
-
-
 def _find_executors_file() -> Path:
-    """Search for executors.yaml in common locations."""
+    """Search for executors.yaml in common locations in order of precedence: CWD > Home > Repo Root."""
     devrun_repo_root = Path(__file__).parent.parent
     candidates = [
-        Path(_DEFAULT_EXECUTORS_FILE),
-        Path.cwd() / ".devrun" / "executors.yaml",
+        Path.cwd() / ".devrun" / "configs" / "executors.yaml",
+        Path.home() / ".devrun" / "configs" / "executors.yaml",
         devrun_repo_root / "devrun" / "configs" / "executors.yaml",
-        Path.home() / ".devrun" / "executors.yaml",
     ]
     for p in candidates:
         if p.exists():
