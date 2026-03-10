@@ -27,5 +27,11 @@ dev = [
 [project.scripts]
 devrun = "devrun.cli:main"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["devrun*"]
+
+[tool.setuptools.package-data]
+devrun = ["configs/**/*.yaml", "configs/**/*.yml"]

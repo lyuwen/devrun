@@ -28,9 +28,25 @@ class SWEBenchEvalTask(BaseTask):
         # Determine working directory if specified, else use None.
         working_dir = params.get("working_dir")
 
+        import hashlib
+        from pathlib import Path
+
         if not run_id:
-            # Generate run_id based on datetime if not provided.
-            run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Generate run_id based on sha256 of predictions.jsonl if possible
+            pred_file = Path(predictions_path)
+            if not pred_file.is_absolute() and working_dir:
+                pred_file = Path(working_dir) / predictions_path
+            
+            if pred_file.is_file():
+                h = hashlib.sha256()
+                # Read in chunks to avoid memory issues with huge files
+                with open(pred_file, "rb") as f:
+                    for chunk in iter(lambda: f.read(4096), b""):
+                        h.update(chunk)
+                run_id = h.hexdigest()[:12]
+            else:
+                # Fallback to datetime if file not found yet
+                run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         command_parts = [
             f"python -m swebench.harness.run_evaluation",
