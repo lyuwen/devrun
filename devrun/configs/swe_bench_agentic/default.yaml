@@ -1,0 +1,30 @@
+# configs/swe_bench_agentic/default.yaml
+task: swe_bench_agentic
+executor: slurm
+
+params:
+  llm_config: .llm_config/coderforce_32b.json
+  dataset: /mnt/huawei/users/lfu/datasets/SWE-bench_Verified
+  output_dir: logs/coderforge-run1
+  split: test
+  max_iterations: 100
+  select_dir: job_array
+  workspace: docker
+  task_id_format: "%03d"
+  
+  # Slurm specific routing options
+  array: "000-499"
+  concurrency_limit: 10
+  partition: "agent"
+  cpus_per_task: 4
+  mem: "32G"
+  walltime: "24:00:00"
+  job_name: "openhands-eval"
+  
+  # Forward SLURM_ARRAY_TASK_ID or set a default one if running locally
+  env:
+    OH_SEND_REASONING_CONTENT: "yes"
+    EVAL_AGENT_SERVER_IMAGE: harbor.zhejianglab.com/zj021/openhands-eval-agent-server
+
+  # Provide setup commands for bash environment before running Python
+  env_commands: []

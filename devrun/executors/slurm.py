@@ -79,7 +79,7 @@ class SlurmExecutor(BaseExecutor):
             partition=resources.get("partition") or self._partition,
             walltime=resources.get("walltime", "04:00:00"),
             env=task_spec.env,
-            extra_sbatch=self._extra_sbatch,
+            extra_sbatch=self._extra_sbatch + resources.get("extra_sbatch", []),
             working_dir=task_spec.working_dir,
             setup_commands=self._setup_commands,
         )
