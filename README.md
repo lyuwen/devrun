@@ -61,12 +61,47 @@ devrun history
 # Re-run a previous job
 devrun rerun <job_id>
 
-# Sync files to/from a cluster
-devrun sync ./data cluster-a:/data
-devrun fetch cluster-a:/results ./results
+# File Synchronization
+The `sync` command provides a simplified wrapper around `rsync` for pushing files to your remote clusters:
+```bash
+# Sync files to a remote host (e.g. your SSH/Slurm node)
+devrun sync ./data swedev2:/remote/data
+
+# Fetch results back
+devrun fetch swedev2:/remote/results ./results
 ```
 
-## Task configuration
+## Executor configuration
+
+Executors define compute targets in `~/.devrun/configs/executors.yaml` or `configs/executors.yaml`:
+
+```yaml
+local:
+  type: local
+
+# Remote SSH execution
+remote_ssh:
+  type: ssh
+  host: swedev2
+
+# Remote Slurm submission (via SSH)
+swedev1_slurm:
+  type: slurm
+  host: swedev1           # If host is provided, sbatch/squeue is executed over SSH!
+  partition: compute
+
+swedev2_slurm:
+  type: slurm
+  host: swedev2
+  partition: agent
+```
+
+### Switching executors on the fly
+You can dynamically override the target executor from the command line without modifying your configured task:
+```bash
+devrun run eval_math executor=swedev1_slurm
+devrun run eval_math executor=swedev2_slurm
+```
 
 Tasks are defined in YAML:
 

@@ -35,9 +35,12 @@ All subclasses of `BaseExecutor` (`devrun/executors/base.py`) must implement `su
 Registered types: `local`, `ssh`, `slurm`, `http`.
 
 * **`LocalExecutor`:** Executes locally using `subprocess`, saving stout logs in `.devrun/logs/`.
-* **`SSHExecutor`:** Remote SSH via `nohup bash` background processes.
-* **`SlurmExecutor`:** Generates `sbatch` scripts, uploads via `scp`, submits via SSH, queries status with `squeue`/`sacct`.
+* **`SSHExecutor`:** Remote execution using `nohup bash` background processes and tracking remote PIDs.
+* **`SlurmExecutor`:** Generates `sbatch` scripts natively. If the `host` property is specified, it automatically uploads the script via `scp` and submits it via SSH, allowing local machines to natively dispatch to remote head nodes.
 * **`HTTPExecutor`:** JSON POST payload to a REST API.
+
+### File Synchronization (`devrun/utils/sync.py`)
+Provides native `devrun sync` and `devrun fetch` CLI wrappers over `rsync` to pull/push artifacts natively between the host and remote target aliases (e.g. `devrun sync ./data swedev2:/data`).
 
 ### Tasks
 All subclasses of `BaseTask` (`devrun/tasks/base.py`) must implement `prepare(params: dict) -> TaskSpec`.
