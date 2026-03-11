@@ -3,22 +3,6 @@ task: swe_bench_eval
 executor: slurm
 
 params:
-  # Path to the SWE-bench dataset (e.g., /path/to/dataset/SWE-bench_Verified)
-  dataset_name: <path_to_dataset>
-  split: test
-  max_workers: 8
-
-  # The run_id will be auto-generated based on datetime if not provided.
-  # run_id: default-run
-
-  predictions_path: predictions.jsonl
-
-  # Working directory where the predictions.jsonl file is located
-  working_dir: <path_to_working_directory>
-
-  # Docker namespace for SWE-bench images (optional)
-  # namespace: <docker_registry_namespace>
-
   # SLURM resource requests
   mem: 64G
   cpus_per_task: 32

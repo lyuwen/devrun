@@ -50,7 +50,9 @@ class TaskRunner:
         """Resolve a target name to config file paths across all search directories.
 
         Returns all matching configs in priority order (first = lowest priority).
-        The merge strategy is: project template → user config → CLI overrides.
+        This merge strategy cascades configuration definitions: it searches for 
+        'default.yaml' across all layers (repo, user, project) and then overlays
+        '{variation}.yaml' across all layers.
         """
         p = Path(target)
         if p.is_file():
@@ -60,17 +62,24 @@ class TaskRunner:
         parts = target.split("/", 1)
         task_name = parts[0]
         variation = parts[1] if len(parts) > 1 else "default"
-        filename = f"{variation}.yaml"
 
         found: list[Path] = []
-        for search_dir in self._config_dirs:
-            candidate = search_dir / task_name / filename
-            if candidate.is_file():
-                found.append(candidate)
+        variations_to_check = ["default"]
+        if variation != "default":
+            variations_to_check.append(variation)
+
+        # Merge strategy: load all 'default' files first, then variation layer
+        for v in variations_to_check:
+            filename = f"{v}.yaml"
+            for search_dir in self._config_dirs:
+                candidate = search_dir / task_name / filename
+                if candidate.is_file():
+                    found.append(candidate)
 
         if not found:
             raise FileNotFoundError(
-                f"Config for '{target}' not found. Searched for '{task_name}/{filename}' in: "
+                f"Config for '{target}' not found. Searched for "
+                f"{variations_to_check} under '{task_name}' in: "
                 + ", ".join(str(d) for d in self._config_dirs)
             )
 
