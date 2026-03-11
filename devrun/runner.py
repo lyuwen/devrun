@@ -153,10 +153,14 @@ class TaskRunner:
         if not record:
             raise ValueError(f"Job {job_id} not found")
 
+        # Forcefully update the job status from the executor before deciding
+        self.status(job_id)
+        record = self._db.get(job_id)
+
         # Do not cancel if it's already in a terminal state
         if record.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
             logger.info("Job %s is already %s, skipping cancellation.", job_id, record.status)
-            return
+            raise ValueError(f"Job {job_id} is already {record.status}.")
 
         try:
             executor = resolve_executor(record.executor, self.executor_configs)
