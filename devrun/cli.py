@@ -58,49 +58,48 @@ def _runner() -> TaskRunner:
 # ---------------------------------------------------------------------------
 
 
-def _show_task_help(task_name: str, ctx: typer.Context) -> None:
+def _show_task_help(target: str, ctx: typer.Context) -> None:
     """Show help for a specific task based on its configuration schema."""
     runner = _runner()
     
     try:
-        config_paths = runner._find_configs(f"{task_name}/default")
+        # _load_config handles merging project configs, user configs, and CLI overrides
+        # We pass target which might be 'task' or 'task/variation'
+        cfg = runner._load_config(target)
     except FileNotFoundError:
-        console.print(f"[red]Error:[/red] No default config found for task '{task_name}'.")
-        console.print(f"Make sure '{task_name}' is a valid task and has a default.yaml under configs/.")
+        console.print(f"[red]Error:[/red] No config found for target '{target}'.")
+        console.print(f"Make sure it is a valid task and has a YAML config under configs/.")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[red]Failed to load configuration for '{target}':[/red] {e}")
         raise typer.Exit(code=1)
         
     try:
         from rich.table import Table
         from rich.panel import Panel
         from rich.text import Text
-        import yaml
         
-        # Load the base config (typically the template bundled with devrun)
-        base_config_path = config_paths[0]
-        with open(base_config_path, "r", encoding="utf-8") as f:
-            raw_cfg = yaml.safe_load(f) or {}
+        # We parse the target name for display
+        task_name = target.split("/")[0]
 
-        console.print(Panel(f"Help for task: [bold cyan]{task_name}[/bold cyan]", expand=False))
+        console.print(Panel(f"Help for target: [bold cyan]{target}[/bold cyan]", expand=False))
         console.print()
 
         # Gather main info
-        task_type = raw_cfg.get("task", "(unknown)")
-        default_executor = raw_cfg.get("executor", "(unknown)")
-        
         info_table = Table(show_header=False, box=None)
         info_table.add_column("Field", style="dim")
         info_table.add_column("Value")
-        info_table.add_row("Task Class:", f"[cyan]{task_type}[/cyan]")
-        info_table.add_row("Default Executor:", f"[green]{default_executor}[/green]")
+        info_table.add_row("Task Class:", f"[cyan]{cfg.task}[/cyan]")
+        info_table.add_row("Default Executor:", f"[green]{cfg.executor}[/green]")
         console.print(info_table)
         console.print()
 
         # Gather parameters
-        params = raw_cfg.get("params", {})
+        params = cfg.params
         if params:
             param_table = Table(title="Task Parameters", show_edge=False, title_justify="left", header_style="bold cyan")
             param_table.add_column("Argument override")
-            param_table.add_column("Default Value")
+            param_table.add_column("Resolved Value")
             
             for k, v in params.items():
                 val_str = str(v)
@@ -116,7 +115,7 @@ def _show_task_help(task_name: str, ctx: typer.Context) -> None:
         
         console.print("\n[dim]Usage Example:[/dim]")
         example_cmd = Text("devrun run ", style="bold")
-        example_cmd.append(task_name, style="bold cyan")
+        example_cmd.append(target, style="bold cyan")
         if params:
             first_param = next(iter(params.keys()))
             example_cmd.append(f" params.{first_param}=value", style="green")
@@ -124,7 +123,7 @@ def _show_task_help(task_name: str, ctx: typer.Context) -> None:
         console.print(example_cmd)
         
     except Exception as e:
-        console.print(f"[red]Failed to load documentation for {task_name}:[/red] {e}")
+        console.print(f"[red]Failed to render documentation for {target}:[/red] {e}")
         raise typer.Exit(code=1)
 
 
