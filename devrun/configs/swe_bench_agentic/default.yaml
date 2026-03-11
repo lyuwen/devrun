@@ -3,9 +3,15 @@ task: swe_bench_agentic
 executor: slurm
 
 params:
-  llm_config: ""     # Override in ~/.devrun/configs or CLI
-  dataset: ""        # Provide absolute path to dataset
-  output_dir: ""     # Provide evaluation output directory
+  model_name: "example_model" # Derives llm_config to .llm_config/example_model.json
+  run_name: "run1"            # Derives output_dir to logs/run1
+  
+  # llm_config can be an absolute path string to a JSON file, or a full dictionary:
+  # llm_config:
+  #   model: "litellm_proxy/anthropic/claude-sonnet-4-20250514"
+  #   api_key: "YOUR_API_KEY"
+  
+  dataset: ""                 # Provide absolute path to dataset
   split: test
   max_iterations: 100
   select_dir: job_array

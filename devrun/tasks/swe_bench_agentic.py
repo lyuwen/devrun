@@ -27,19 +27,50 @@ class SWEBenchAgenticTask(BaseTask):
         return params.get("extra_flags", ["--use-legacy-tools", "--bind-dev-sdk"])
 
     def prepare(self, params: dict[str, Any]) -> TaskSpec:
+        model_name = params.get("model_name")
+        run_name = params.get("run_name")
+        
         llm_config = params.get("llm_config")
+        
+        # If the user passed a dictionary directly into YAML, serialize it to a JSON file
+        if isinstance(llm_config, dict):
+            import json
+            from pathlib import Path
+            
+            config_name = model_name or run_name or "custom_llm"
+            llm_config_dir = Path(params.get("llm_config_dir", ".llm_config"))
+            llm_config_dir.mkdir(parents=True, exist_ok=True)
+            
+            generated_path = llm_config_dir / f"{config_name}.json"
+            with open(generated_path, "w", encoding="utf-8") as f:
+                json.dump(llm_config, f, indent=2)
+                
+            llm_config = str(generated_path)
+            
+        if not llm_config:
+            if model_name:
+                llm_config_dir = params.get("llm_config_dir", ".llm_config")
+                llm_config = f"{llm_config_dir}/{model_name}.json"
+            else:
+                raise ValueError("Either params.llm_config or params.model_name is required")
+                
+        output_dir = params.get("output_dir")
+        if not output_dir:
+            logs_dir = params.get("logs_dir", "logs")
+            if not run_name:
+                import datetime
+                run_name = f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            output_dir = f"{logs_dir}/{run_name}"
+
         dataset = params.get("dataset")
         split = params.get("split", "test")
         max_iterations = params.get("max_iterations", 100)
         select_dir = params.get("select_dir", "job_array")
         workspace = params.get("workspace", "docker")
-        output_dir = params.get("output_dir", "logs/eval_run")
         task_id_format = params.get("task_id_format", "%03d")
         array = params.get("array")
         concurrency_limit = params.get("concurrency_limit")
         
-        if not llm_config:
-            raise ValueError("params.llm_config is required")
         if not dataset:
             raise ValueError("params.dataset is required")
 
