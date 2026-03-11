@@ -135,8 +135,15 @@ class TaskRunner:
             return f"Error fetching logs: {exc}"
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
-        """Return recent job records."""
-        return [r.model_dump(mode="json") for r in self._db.list_all(limit)]
+        """Return recent job records, refreshing active ones first."""
+        records = self._db.list_all(limit)
+        results = []
+        for r in records:
+            if r.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING, JobStatus.UNKNOWN):
+                results.append(self.status(r.job_id))
+            else:
+                results.append(r.model_dump(mode="json"))
+        return results
 
     def rerun(self, job_id: str) -> list[str]:
         """Re-submit a previous job with the same parameters."""
