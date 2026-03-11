@@ -3,9 +3,9 @@ task: swe_bench_agentic
 executor: slurm
 
 params:
-  llm_config: .llm_config/coderforce_32b.json
-  dataset: /mnt/huawei/users/lfu/datasets/SWE-bench_Verified
-  output_dir: logs/coderforge-run1
+  llm_config: ""     # Override in ~/.devrun/configs or CLI
+  dataset: ""        # Provide absolute path to dataset
+  output_dir: ""     # Provide evaluation output directory
   split: test
   max_iterations: 100
   select_dir: job_array
@@ -24,7 +24,6 @@ params:
   # Forward SLURM_ARRAY_TASK_ID or set a default one if running locally
   env:
     OH_SEND_REASONING_CONTENT: "yes"
-    EVAL_AGENT_SERVER_IMAGE: harbor.zhejianglab.com/zj021/openhands-eval-agent-server
 
   # Provide setup commands for bash environment before running Python
   env_commands: []
