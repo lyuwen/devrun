@@ -54,6 +54,11 @@ class SWEBenchAgenticTask(BaseTask):
             else:
                 raise ValueError("Either params.llm_config or params.model_name is required")
                 
+        # Proactively block submissions if the resolved config physically doesn't exist
+        from pathlib import Path
+        if not Path(llm_config).is_file():
+            raise FileNotFoundError(f"Resolved llm_config file does not exist: {llm_config}")
+                
         output_dir = params.get("output_dir")
         if not output_dir:
             logs_dir = params.get("logs_dir", "logs")
@@ -73,6 +78,9 @@ class SWEBenchAgenticTask(BaseTask):
         
         if not dataset:
             raise ValueError("params.dataset is required")
+            
+        if not Path(dataset).exists():
+            raise FileNotFoundError(f"Resolved dataset path does not exist: {dataset}")
 
         script = self._get_run_script(params)
         flags = self._get_default_flags(params)
