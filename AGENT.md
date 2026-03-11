@@ -24,7 +24,7 @@ All interactions are driven entirely by YAML configuration files.
 * **`devrun/models.py`:** Central Pydantic models. Core entity is `TaskSpec` which holds the final executed `command`, `env`, and `resources` and is returned by `Task.prepare()`.
 * **`devrun/registry.py`:** Custom decorator-based registry (`@register_task`, `@register_executor`) for automated discovery of plugins.
 * **`devrun/runner.py`:** Orchestration logic. Loads YAML configs, expands sweeps via Cartesian product, invokes task preparation, writes to DB, invokes executor plugin `submit()`, and updates DB on error.
-* **`devrun/cli.py`:** User entry point with 8 Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`.
+* **`devrun/cli.py`:** User entry point with 8 Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`. Supports command-line autocompletion for tasks (`devrun --show-completion bash`) and context-aware task help via `devrun run <task> --help` (parses YAML configurations).
 * **`devrun/db/jobs.py`:** Persistent SQLite job store.
 * **`configs/`:** Example YAML configurations for execution (`executors.yaml`), deployment (`deploy_ray.yaml`), and logic (`eval_math.yaml`, `eval_sweep.yaml`, `inference.yaml`).
 

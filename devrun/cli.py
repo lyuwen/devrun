@@ -16,12 +16,19 @@ from devrun.runner import TaskRunner
 from devrun.registry import list_tasks, list_executors
 from devrun.utils.sync import sync_to_remote, fetch_from_remote
 
+def complete_target(incomplete: str):
+    """Provide task name completions for the CLI."""
+    for t in list_tasks():
+        if t.startswith(incomplete):
+            yield t
+
+
 app = typer.Typer(
     name="devrun",
-    help="Modular developer task orchestration system.",
-    add_completion=False,
+    help="Modular developer task orchestration system."
 )
 console = Console()
+
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -51,16 +58,109 @@ def _runner() -> TaskRunner:
 # ---------------------------------------------------------------------------
 
 
+def _show_task_help(task_name: str, ctx: typer.Context) -> None:
+    """Show help for a specific task based on its configuration schema."""
+    runner = _runner()
+    
+    try:
+        config_paths = runner._find_configs(f"{task_name}/default")
+    except FileNotFoundError:
+        console.print(f"[red]Error:[/red] No default config found for task '{task_name}'.")
+        console.print(f"Make sure '{task_name}' is a valid task and has a default.yaml under configs/.")
+        raise typer.Exit(code=1)
+        
+    try:
+        from rich.table import Table
+        from rich.panel import Panel
+        from rich.text import Text
+        import yaml
+        
+        # Load the base config (typically the template bundled with devrun)
+        base_config_path = config_paths[0]
+        with open(base_config_path, "r", encoding="utf-8") as f:
+            raw_cfg = yaml.safe_load(f) or {}
+
+        console.print(Panel(f"Help for task: [bold cyan]{task_name}[/bold cyan]", expand=False))
+        console.print()
+
+        # Gather main info
+        task_type = raw_cfg.get("task", "(unknown)")
+        default_executor = raw_cfg.get("executor", "(unknown)")
+        
+        info_table = Table(show_header=False, box=None)
+        info_table.add_column("Field", style="dim")
+        info_table.add_column("Value")
+        info_table.add_row("Task Class:", f"[cyan]{task_type}[/cyan]")
+        info_table.add_row("Default Executor:", f"[green]{default_executor}[/green]")
+        console.print(info_table)
+        console.print()
+
+        # Gather parameters
+        params = raw_cfg.get("params", {})
+        if params:
+            param_table = Table(title="Task Parameters", show_edge=False, title_justify="left", header_style="bold cyan")
+            param_table.add_column("Argument override")
+            param_table.add_column("Default Value")
+            
+            for k, v in params.items():
+                val_str = str(v)
+                if val_str.startswith("<") and val_str.endswith(">"):
+                    val_str = f"[yellow]{val_str}[/yellow]"
+                
+                param_table.add_row(f"params.[bold]{k}[/bold]", val_str)
+            
+            console.print(param_table)
+        else:
+            console.print("[dim]No default parameters defined.[/dim]")
+            console.print()
+        
+        console.print("\n[dim]Usage Example:[/dim]")
+        example_cmd = Text("devrun run ", style="bold")
+        example_cmd.append(task_name, style="bold cyan")
+        if params:
+            first_param = next(iter(params.keys()))
+            example_cmd.append(f" params.{first_param}=value", style="green")
+        
+        console.print(example_cmd)
+        
+    except Exception as e:
+        console.print(f"[red]Failed to load documentation for {task_name}:[/red] {e}")
+        raise typer.Exit(code=1)
+
+
 @app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+    name="run",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []}
 )
 def run(
     ctx: typer.Context,
-    target: str = typer.Argument(..., help="Config path, task, or task/variation"),
+    target: Optional[str] = typer.Argument(
+        None, 
+        help="Config path, task, or task/variation",
+        autocompletion=complete_target
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Prepare job without actually executing it"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+    help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
     """Submit a task using a config file or variation. Trailing arguments are passed as OmegaConf overrides."""
+    
+    # Handle help manually so we can show task-specific help
+    if help:
+        if not target:
+            # Show standard devrun run help
+            console.print(ctx.get_help())
+            raise typer.Exit()
+        else:
+            # Show task-specific help using its configuration template
+            _show_task_help(target, ctx)
+            raise typer.Exit()
+            
+    if not target:
+        console.print("[red]Missing argument 'TARGET'.[/red]\n")
+        console.print(ctx.get_help())
+        raise typer.Exit(code=2)
+        
     _setup_logging(verbose)
     runner = _runner()
     
