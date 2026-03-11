@@ -147,6 +147,27 @@ class TaskRunner:
         new_id = self._submit_single(record.task_name, record.executor, params)
         return [new_id]
 
+    def cancel(self, job_id: str) -> None:
+        """Cancel a running job."""
+        record = self._db.get(job_id)
+        if not record:
+            raise ValueError(f"Job {job_id} not found")
+
+        # Do not cancel if it's already in a terminal state
+        if record.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            logger.info("Job %s is already %s, skipping cancellation.", job_id, record.status)
+            return
+
+        try:
+            executor = resolve_executor(record.executor, self.executor_configs)
+            remote_id = record.remote_job_id or job_id
+            executor.cancel(remote_id)
+            self._db.update_status(job_id, JobStatus.CANCELLED, completed_at=datetime.utcnow())
+            logger.info("Job %s cancelled successfully.", job_id)
+        except Exception as exc:
+            logger.error("Failed to cancel job %s: %s", job_id, exc)
+            raise
+
     # ---- internal --------------------------------------------------------
 
     def _load_config(self, target: str, overrides: list[str] | None = None) -> TaskConfig:

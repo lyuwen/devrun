@@ -276,6 +276,24 @@ def rerun(
 
 
 @app.command()
+def cancel(
+    job_id: str = typer.Argument(..., help="Job ID to cancel"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Cancel a running job."""
+    _setup_logging(verbose)
+    try:
+        _runner().cancel(job_id)
+        console.print(f"[green]✓[/green] Cancellation requested for: [bold]{job_id}[/bold]")
+    except ValueError as exc:
+        console.print(f"[yellow]⚠ Warning:[/yellow] {exc}")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[red]✗ Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def sync(
     source: str = typer.Argument(..., help="Source path (local or remote:path)"),
     destination: str = typer.Argument(..., help="Destination path (local or remote:path)"),
