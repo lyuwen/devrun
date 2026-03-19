@@ -1,0 +1,9 @@
+# Test configuration for inference task
+task: inference
+executor: local
+
+params:
+  model: llama-2-70b
+  input_file: /data/inputs.jsonl
+  output_file: /data/outputs.jsonl
+  batch_size: 32

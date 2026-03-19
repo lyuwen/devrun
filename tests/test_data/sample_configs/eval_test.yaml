@@ -1,0 +1,8 @@
+# Test configuration for eval task
+task: eval
+executor: local
+
+params:
+  model: test-model
+  dataset: test-dataset
+  batch_size: 8

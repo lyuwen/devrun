@@ -1,0 +1,11 @@
+# Test configuration with parameter sweep
+task: eval
+executor: local
+
+params:
+  model: test-model
+  dataset: test-dataset
+
+sweep:
+  batch_size: [4, 8, 16]
+  learning_rate: [0.001, 0.01]
