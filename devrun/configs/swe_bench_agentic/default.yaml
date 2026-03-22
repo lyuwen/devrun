@@ -21,6 +21,7 @@ params:
   # Slurm specific routing options
   array: "000-499"
   concurrency_limit: 10
+  oversubscribe: false
   partition: "agent"
   cpus_per_task: 4
   mem: "32G"

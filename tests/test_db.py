@@ -162,7 +162,6 @@ class TestJobStoreInsert:
         finally:
             Path(db_path).unlink(missing_ok=True)
 
-    @pytest.mark.skip(reason="Test returns None - need to investigate")
     def test_insert_creates_timestamp(self):
         """Verify insert sets created_at timestamp."""
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -454,7 +453,6 @@ class TestJobStoreClose:
 class TestJobStoreEdgeCases:
     """Edge case tests for JobStore."""
 
-    @pytest.mark.skip(reason="Test isolation issue with temp_home fixture")
     def test_multiple_inserts(self):
         """Verify multiple inserts work correctly."""
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import shlex
 from typing import Any
 
 from devrun.models import TaskSpec
@@ -28,6 +29,17 @@ class SWEBenchEvalTask(BaseTask):
         # Determine working directory if specified, else use None.
         working_dir = params.get("working_dir")
 
+        def _check_placeholder(name: str, value: str) -> None:
+            if value and str(value).startswith("<") and str(value).endswith(">"):
+                raise ValueError(
+                    f"params.{name} is still a template placeholder ({value!r}). "
+                    f"Set it with: devrun run swe_bench_eval params.{name}=/actual/path"
+                )
+
+        _check_placeholder("dataset_name", dataset_name)
+        if working_dir:
+            _check_placeholder("working_dir", working_dir)
+
         import hashlib
         from pathlib import Path
 
@@ -49,15 +61,15 @@ class SWEBenchEvalTask(BaseTask):
                 run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
         command_parts = [
-            f"python -m swebench.harness.run_evaluation",
-            f"    --dataset_name {dataset_name}",
-            f"    --split {split}",
-            f"    --max_workers {max_workers}",
-            f"    --run_id {run_id}",
-            f"    --predictions_path {predictions_path}",
+            "python -m swebench.harness.run_evaluation",
+            f"    --dataset_name {shlex.quote(str(dataset_name))}",
+            f"    --split {shlex.quote(str(split))}",
+            f"    --max_workers {int(max_workers)}",
+            f"    --run_id {shlex.quote(str(run_id))}",
+            f"    --predictions_path {shlex.quote(str(predictions_path))}",
         ]
         if namespace:
-            command_parts.append(f"    --namespace {namespace}")
+            command_parts.append(f"    --namespace {shlex.quote(str(namespace))}")
 
         command = " \\\n".join(command_parts)
 

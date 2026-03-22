@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 from typing import Any
 
 logger = logging.getLogger("devrun.utils.slurm")
@@ -23,6 +24,7 @@ def generate_sbatch_script(
     extra_sbatch: list[str] | None = None,
     working_dir: str | None = None,
     setup_commands: list[str] | None = None,
+    output_dir: str | None = None,
 ) -> str:
     """Return a complete ``#!/bin/bash`` SLURM batch script."""
     lines: list[str] = ["#!/bin/bash"]
@@ -37,8 +39,12 @@ def generate_sbatch_script(
     if partition:
         lines.append(f"#SBATCH --partition={partition}")
     lines.append(f"#SBATCH --time={walltime}")
-    lines.append("#SBATCH --output=devrun_%j.out")
-    lines.append("#SBATCH --error=devrun_%j.err")
+    if output_dir:
+        lines.append(f"#SBATCH --output={output_dir}/devrun_%j.out")
+        lines.append(f"#SBATCH --error={output_dir}/devrun_%j.err")
+    else:
+        lines.append("#SBATCH --output=devrun_%j.out")
+        lines.append("#SBATCH --error=devrun_%j.err")
 
     for extra in extra_sbatch or []:
         lines.append(f"#SBATCH {extra}")
@@ -53,7 +59,7 @@ def generate_sbatch_script(
 
     # Export env vars
     for key, val in (env or {}).items():
-        lines.append(f"export {key}={val}")
+        lines.append(f"export {key}={shlex.quote(str(val))}")
     if env:
         lines.append("")
 
@@ -85,16 +91,3 @@ def parse_squeue_status(output: str, job_id: str) -> str:
     if not status or "Invalid" in status:
         return "unknown"
     return status.lower()
-
-
-def parse_sacct_status(output: str) -> dict[str, Any]:
-    """Parse sacct output (``--parsable2 --format=JobID,State,ExitCode``)."""
-    result: dict[str, Any] = {}
-    for line in output.strip().splitlines():
-        parts = line.split("|")
-        if len(parts) >= 2:
-            result["job_id"] = parts[0]
-            result["state"] = parts[1].lower()
-            if len(parts) >= 3:
-                result["exit_code"] = parts[2]
-    return result

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -83,56 +82,25 @@ def executors_yaml(temp_home):
 
 
 # ============================================================================
-# In-memory database fixture
+# Job store fixtures
 # ============================================================================
 
 @pytest.fixture
-def in_memory_db():
-    """Provide an in-memory SQLite database for testing."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    # Create the schema
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS jobs (
-            job_id        TEXT PRIMARY KEY,
-            task_name     TEXT NOT NULL,
-            executor      TEXT NOT NULL,
-            parameters    TEXT DEFAULT '',
-            remote_job_id TEXT,
-            status        TEXT DEFAULT 'pending',
-            created_at    TEXT NOT NULL,
-            completed_at  TEXT,
-            log_path      TEXT
-        )
-    """)
-    conn.commit()
-    yield conn
-    conn.close()
-
-
-# ============================================================================
-# Mock job store fixture
-# ============================================================================
-
-@pytest.fixture
-def mock_job_store(in_memory_db):
-    """Provide a mock JobStore with in-memory database."""
+def job_store(tmp_path):
+    """Real JobStore backed by a temp SQLite file."""
     from devrun.db.jobs import JobStore
-    from devrun.models import JobStatus
+    store = JobStore(tmp_path / "test_jobs.db")
+    yield store
+    store.close()
 
-    # Create a temporary file path for JobStore initialization
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
 
-    try:
-        store = JobStore(db_path)
-
-        # Replace the connection with our in-memory one
-        store._conn = in_memory_db
-
-        yield store
-    finally:
-        Path(db_path).unlink(missing_ok=True)
+@pytest.fixture
+def mock_job_store(tmp_path):
+    """Alias for job_store for backward compatibility."""
+    from devrun.db.jobs import JobStore
+    store = JobStore(tmp_path / "test_jobs.db")
+    yield store
+    store.close()
 
 
 # ============================================================================
@@ -226,13 +194,11 @@ def mock_subprocess():
 @pytest.fixture
 def task_runner(mock_job_store, executors_yaml, temp_dir, monkeypatch):
     """Provide a fully configured TaskRunner for testing."""
-    # Patch the log directory to use temp location
     log_dir = temp_dir / ".devrun" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     with patch("devrun.executors.local._LOG_DIR", log_dir):
         from devrun.runner import TaskRunner
-
         runner = TaskRunner(executors_path=str(executors_yaml), db_path=mock_job_store._db_path)
         yield runner
 

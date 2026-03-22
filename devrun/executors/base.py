@@ -30,7 +30,7 @@ class BaseExecutor(ABC):
         """Query the current status of a previously submitted job."""
 
     @abstractmethod
-    def logs(self, job_id: str) -> str:
+    def logs(self, job_id: str, log_path: str | None = None) -> str:
         """Retrieve log output for a job."""
 
     # ---- optional hooks --------------------------------------------------

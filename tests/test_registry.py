@@ -78,19 +78,21 @@ class TestExecutorRegistration:
     def test_executor_reregistration_warning(self, caplog):
         """Verify re-registering an executor logs a warning."""
         from devrun.executors.base import BaseExecutor
+        import uuid
+        test_name = f"test_warn_{uuid.uuid4().hex[:6]}"
 
-        @register_executor("local")  # Already registered
-        class DuplicateExecutor(BaseExecutor):
-            def submit(self, task_spec):
-                return "test"
+        @register_executor(test_name)
+        class DuplicateA(BaseExecutor):
+            def submit(self, task_spec): return "test"
+            def status(self, job_id): return "completed"
+            def logs(self, job_id): return "log"
 
-            def status(self, job_id):
-                return "completed"
+        @register_executor(test_name)
+        class DuplicateB(BaseExecutor):
+            def submit(self, task_spec): return "test"
+            def status(self, job_id): return "completed"
+            def logs(self, job_id): return "log"
 
-            def logs(self, job_id):
-                return "log"
-
-        # Should have logged a warning
         assert any("Overwriting executor" in record.message for record in caplog.records)
 
 
@@ -141,7 +143,6 @@ class TestTaskRegistration:
 class TestBuiltInRegistrations:
     """Tests for built-in executor and task registrations."""
 
-    @pytest.mark.skip(reason="Flaky - passes in isolation")
     def test_local_executor_registered(self):
         """Verify 'local' executor is registered."""
         cls = get_executor_class("local")

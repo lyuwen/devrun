@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -83,7 +83,7 @@ class JobRecord(BaseModel):
     parameters: str = ""  # JSON-encoded params
     remote_job_id: str | None = None
     status: JobStatus = JobStatus.PENDING
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     log_path: str | None = None
 

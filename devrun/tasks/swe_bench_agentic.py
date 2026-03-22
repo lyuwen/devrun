@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
+import logging as _logging
 from typing import Any
 
 from devrun.models import TaskSpec
 from devrun.registry import register_task
 from devrun.tasks.base import BaseTask
 
+_agentic_logger = _logging.getLogger("devrun.tasks.swe_bench_agentic")
+
 
 @register_task("swe_bench_agentic")
 class SWEBenchAgenticTask(BaseTask):
     """Prepare an Agentic SWE-bench evaluation job using an OpenHands run_infer script.
-    
+
     This class is designed to be inherited by other synthesis or evaluation tasks.
-    It expects the executor (like SlurmExecutor) to provide an array ID via 
+    It expects the executor (like SlurmExecutor) to provide an array ID via
     environment variables (e.g. SLURM_ARRAY_TASK_ID).
     """
 
     def _get_run_script(self, params: dict[str, Any]) -> str:
         """Override in subclasses to change the executed script."""
         return params.get("run_script", "benchmarks/swebench/run_infer.py")
-        
+
     def _get_default_flags(self, params: dict[str, Any]) -> list[str]:
         """Override in subclasses to provide extra default flags."""
         return params.get("extra_flags", ["--use-legacy-tools", "--bind-dev-sdk"])
@@ -29,36 +32,40 @@ class SWEBenchAgenticTask(BaseTask):
     def prepare(self, params: dict[str, Any]) -> TaskSpec:
         model_name = params.get("model_name")
         run_name = params.get("run_name")
-        
+
         llm_config = params.get("llm_config")
-        
+
         # If the user passed a dictionary directly into YAML, serialize it to a JSON file
         if isinstance(llm_config, dict):
             import json
             from pathlib import Path
-            
+
             config_name = model_name or run_name or "custom_llm"
             llm_config_dir = Path(params.get("llm_config_dir", ".llm_config"))
             llm_config_dir.mkdir(parents=True, exist_ok=True)
-            
+
             generated_path = llm_config_dir / f"{config_name}.json"
             with open(generated_path, "w", encoding="utf-8") as f:
                 json.dump(llm_config, f, indent=2)
-                
+
             llm_config = str(generated_path)
-            
+
         if not llm_config:
             if model_name:
                 llm_config_dir = params.get("llm_config_dir", ".llm_config")
                 llm_config = f"{llm_config_dir}/{model_name}.json"
             else:
                 raise ValueError("Either params.llm_config or params.model_name is required")
-                
-        # Proactively block submissions if the resolved config physically doesn't exist
+
+        # Warn (but don't block) if the resolved config doesn't exist locally —
+        # it may exist on the remote host.
         from pathlib import Path
         if not Path(llm_config).is_file():
-            raise FileNotFoundError(f"Resolved llm_config file does not exist: {llm_config}")
-                
+            _agentic_logger.warning(
+                "llm_config file not found locally: %s — assuming it exists on the remote host.",
+                llm_config,
+            )
+
         output_dir = params.get("output_dir")
         if not output_dir:
             logs_dir = params.get("logs_dir", "logs")
@@ -75,23 +82,26 @@ class SWEBenchAgenticTask(BaseTask):
         task_id_format = params.get("task_id_format", "%03d")
         array = params.get("array")
         concurrency_limit = params.get("concurrency_limit")
-        
+
         if not dataset:
             raise ValueError("params.dataset is required")
-            
+
         if not Path(dataset).exists():
-            raise FileNotFoundError(f"Resolved dataset path does not exist: {dataset}")
+            _agentic_logger.warning(
+                "dataset path not found locally: %s — assuming it exists on the remote host.",
+                dataset,
+            )
 
         script = self._get_run_script(params)
         flags = self._get_default_flags(params)
-        
+
         env_commands = params.get("env_commands", [])
-        
+
         # Bash automation to resolve the SLURM_ARRAY_TASK_ID into the formatted number
         command_lines = []
         for cmd in env_commands:
             command_lines.append(cmd)
-            
+
         command_lines.extend([
             "",
             f"DATASET={dataset}",
@@ -100,28 +110,32 @@ class SWEBenchAgenticTask(BaseTask):
             f'OUTPUT_PATH="{output_dir}/${{num}}"',
             f'mkdir -p "${{OUTPUT_PATH}}"',
             f'echo "Processing ${{num}} -> ${{OUTPUT_PATH}}"',
-            f'python {script} {llm_config} \\',
-            f'    --dataset ${{DATASET}} \\',
-            f'    --split {split} \\',
-            f'    --max-iterations {max_iterations} \\',
-            f'    --select {select_dir}/${{num}}.txt \\',
-            f'    --workspace {workspace} \\',
-            f'    --output-dir "${{OUTPUT_PATH}}" \\'
         ])
-        
-        # Append the extra flags
+
+        # Build the python command with proper backslash continuation
+        python_args = [
+            f"python {script} {llm_config}",
+            f"    --dataset ${{DATASET}}",
+            f"    --split {split}",
+            f"    --max-iterations {max_iterations}",
+            f"    --select {select_dir}/${{num}}.txt",
+            f"    --workspace {workspace}",
+            f'    --output-dir "${{OUTPUT_PATH}}"',
+        ]
         for flag in flags:
-            command_lines.append(f'    {flag} \\')
-            
-        # Strip trailing slashes safely
-        command = "\n".join(command_lines).rstrip(" \\")
-        
+            python_args.append(f"    {flag}")
+
+        python_cmd = " \\\n".join(python_args)
+        command_lines.append(python_cmd)
+
+        command = "\n".join(command_lines)
+
         resources = {}
         # Parse standard slurm resources
         for k in ["nodes", "gpus_per_node", "gpus", "walltime", "partition", "mem", "cpus_per_task", "job_name"]:
             if k in params:
                 resources[k] = params[k]
-                
+
         # Forward the --array flag to Slurm via extra_sbatch
         extra_sbatch = []
         if array:
@@ -129,16 +143,21 @@ class SWEBenchAgenticTask(BaseTask):
             if concurrency_limit:
                 array_str += f"%{concurrency_limit}"
             extra_sbatch.append(f"--array {array_str}")
-            extra_sbatch.append("--oversubscribe")
             extra_sbatch.append("--output=slurm_logs/slurm-%A_%a.out")
             extra_sbatch.append("--error=slurm_logs/slurm-%A_%a.err")
-            
+            # mkdir -p slurm_logs must be the first command in the script
+            command_lines.insert(0, "mkdir -p slurm_logs")
+            command = "\n".join(command_lines)
+
+        if params.get("oversubscribe", False):
+            extra_sbatch.append("--oversubscribe")
+
         if extra_sbatch:
             # We assume SlurmExecutor supports extra_sbatch injected via resources
             resources["extra_sbatch"] = extra_sbatch
-            
+
         working_dir = params.get("working_dir")
-        
+
         return TaskSpec(
             command=command,
             resources=resources,

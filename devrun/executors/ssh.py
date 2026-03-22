@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shlex
+import uuid
+
 from devrun.executors.base import BaseExecutor
 from devrun.models import ExecutorEntry, TaskSpec
 from devrun.registry import register_executor
@@ -23,13 +26,26 @@ class SSHExecutor(BaseExecutor):
         )
 
     def submit(self, task_spec: TaskSpec) -> str:
-        env_prefix = " ".join(f"{k}={v}" for k, v in task_spec.env.items())
+        # Bug 3 fix: shell-quote env values
+        env_prefix = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in task_spec.env.items())
         full_cmd = f"{env_prefix} {task_spec.command}".strip()
-        if task_spec.working_dir:
-            full_cmd = f"cd {task_spec.working_dir} && {full_cmd}"
 
-        # Launch in background, capture PID
-        remote_cmd = f"nohup bash -c '{full_cmd}' > /tmp/devrun_ssh_$$.log 2>&1 & echo $!"
+        # Bug 4 fix: shell-quote the working_dir path
+        if task_spec.working_dir:
+            full_cmd = f"cd {shlex.quote(task_spec.working_dir)} && {full_cmd}"
+
+        # Bug 1 fix: use a uuid token so the log file name is deterministic
+        run_token = uuid.uuid4().hex[:12]
+        remote_log = f"/tmp/devrun_ssh_{run_token}.log"
+
+        # Bug 2 fix: use a heredoc so single quotes inside full_cmd are safe
+        remote_cmd = (
+            f"nohup bash << 'DEVRUN_EOF' > {remote_log} 2>&1 &\n"
+            f"{full_cmd}\n"
+            f"DEVRUN_EOF\n"
+            f"echo $!"
+        )
+
         self.logger.info("SSH submit to %s: %s", self._ssh.host, task_spec.command)
         result = run_ssh_command(self._ssh, remote_cmd)
 
@@ -38,16 +54,39 @@ class SSHExecutor(BaseExecutor):
 
         remote_pid = result.stdout.strip()
         self.logger.info("Remote PID: %s", remote_pid)
-        return remote_pid
+
+        # Bug 1 fix: return composite job_id so logs/status/cancel can find the file
+        return f"{remote_pid}:{run_token}"
 
     def status(self, job_id: str) -> str:
-        result = run_ssh_command(self._ssh, f"kill -0 {job_id} 2>/dev/null && echo running || echo done")
+        # Bug 1 fix: parse composite job_id
+        pid = job_id.split(":")[0]
+
+        # Bug 7 fix: use timeout=30 for status checks
+        # Bug 6 fix: return "completed" instead of "done"
+        result = run_ssh_command(
+            self._ssh,
+            f"kill -0 {pid} 2>/dev/null && echo running || echo completed",
+            timeout=30,
+        )
         return result.stdout.strip() if result.returncode == 0 else "unknown"
 
-    def logs(self, job_id: str) -> str:
-        result = run_ssh_command(self._ssh, f"cat /tmp/devrun_ssh_{job_id}.log 2>/dev/null || echo '(no logs)'")
+    def logs(self, job_id: str, log_path: str | None = None) -> str:
+        # Bug 1 fix: parse composite job_id to get the token for the log path
+        parts = job_id.split(":")
+        run_token = parts[1] if len(parts) > 1 else parts[0]
+        remote_log = f"/tmp/devrun_ssh_{run_token}.log"
+
+        # Bug 7 fix: use timeout=60 for log retrieval
+        result = run_ssh_command(
+            self._ssh,
+            f"cat {remote_log} 2>/dev/null || echo '(no logs)'",
+            timeout=60,
+        )
         return result.stdout
 
     def cancel(self, job_id: str) -> None:
-        run_ssh_command(self._ssh, f"kill {job_id} 2>/dev/null")
-        self.logger.info("Sent kill to remote PID %s", job_id)
+        # Bug 1 fix: parse composite job_id to get the PID
+        pid = job_id.split(":")[0]
+        run_ssh_command(self._ssh, f"kill {pid} 2>/dev/null")
+        self.logger.info("Sent kill to remote PID %s", pid)

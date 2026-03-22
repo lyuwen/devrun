@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 from devrun.executors.base import BaseExecutor
@@ -82,15 +83,17 @@ class SlurmExecutor(BaseExecutor):
             extra_sbatch=self._extra_sbatch + resources.get("extra_sbatch", []),
             working_dir=task_spec.working_dir,
             setup_commands=self._setup_commands,
+            output_dir=task_spec.working_dir,
         )
 
         # Write script to a persistent location for debugging
         job_name = task_spec.metadata.get("job_name", "devrun")
-        script_path = _SCRIPT_DIR / f"sbatch_{job_name}.sh"
+        suffix = uuid.uuid4().hex[:8]
+        script_path = _SCRIPT_DIR / f"sbatch_{job_name}_{suffix}.sh"
         script_path.write_text(script)
         self.logger.info("Wrote SLURM script to %s", script_path)
 
-        submit_path = self._upload_script(str(script_path), f"/tmp/devrun_sbatch_{job_name}.sh")
+        submit_path = self._upload_script(str(script_path), f"/tmp/devrun_sbatch_{job_name}_{suffix}.sh")
 
         result = self._run_cmd(f"sbatch {submit_path}")
         if result.returncode != 0:
@@ -98,6 +101,10 @@ class SlurmExecutor(BaseExecutor):
 
         slurm_job_id = parse_sbatch_output(result.stdout)
         self.logger.info("SLURM job submitted: %s", slurm_job_id)
+
+        log_dir = Path(task_spec.working_dir) if task_spec.working_dir else Path.cwd()
+        task_spec.metadata["log_path"] = str(log_dir / f"devrun_{slurm_job_id}.out")
+
         return slurm_job_id
 
     def status(self, job_id: str) -> str:
@@ -110,16 +117,15 @@ class SlurmExecutor(BaseExecutor):
             f"sacct -j {job_id} --parsable2 --noheader --format=JobID,State,ExitCode 2>/dev/null",
         )
         if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().splitlines():
-                parts = line.split("|")
-                if len(parts) >= 2 and parts[0] == job_id:
+            lines = [l.split("|") for l in result.stdout.strip().splitlines() if "|" in l]
+            for parts in lines:
+                if parts[0] == job_id and len(parts) >= 2:
                     return parts[1].lower()
         return "unknown"
 
-    def logs(self, job_id: str) -> str:
-        result = self._run_cmd(
-            f"cat devrun_{job_id}.out 2>/dev/null || echo '(no output file found)'",
-        )
+    def logs(self, job_id: str, log_path: str | None = None) -> str:
+        path = log_path or f"devrun_{job_id}.out"
+        result = self._run_cmd(f"cat {path} 2>/dev/null || echo '(no output file found)'")
         return result.stdout
 
     def cancel(self, job_id: str) -> None:
