@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from devrun.models import ExecutorEntry, TaskSpec
+from devrun.models import ExecutorEntry, PythonEnv, TaskSpec
 
 logger = logging.getLogger("devrun.executors.base")
 
@@ -68,3 +68,46 @@ class BaseExecutor(ABC):
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} name={self.name!r}>"
+
+    # ---- python environment helpers -------------------------------------
+
+    @staticmethod
+    def _resolve_python_env(
+        executor_env: PythonEnv | None,
+        task_env: PythonEnv | None,
+    ) -> PythonEnv | None:
+        """Merge executor-level and task-level PythonEnv.
+
+        Merge semantics:
+        - ``venv`` / ``conda``: task value wins if set, else executor value.
+        - ``modules``: task list replaces executor list entirely if non-empty.
+        - ``setup_commands``: executor list prepended to task list (both kept).
+        """
+        if not executor_env and not task_env:
+            return None
+        base = executor_env or PythonEnv()
+        override = task_env or PythonEnv()
+        return PythonEnv(
+            venv=override.venv or base.venv,
+            conda=override.conda or base.conda,
+            modules=override.modules if override.modules else base.modules,
+            setup_commands=base.setup_commands + override.setup_commands,
+        )
+
+    @staticmethod
+    def _env_to_shell_lines(env: PythonEnv) -> list[str]:
+        """Convert a PythonEnv into ordered shell preamble lines.
+
+        Order: module loads → venv activation → conda activation → setup_commands.
+        """
+        lines: list[str] = []
+        for mod in env.modules:
+            lines.append(f"module load {mod}")
+        if env.venv:
+            # Accept either a venv root dir or a direct path to the activate script
+            activate = env.venv if env.venv.endswith("activate") else f"{env.venv}/bin/activate"
+            lines.append(f"source {activate}")
+        if env.conda:
+            lines.append(f"conda activate {env.conda}")
+        lines.extend(env.setup_commands)
+        return lines

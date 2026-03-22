@@ -29,8 +29,19 @@ class SlurmExecutor(BaseExecutor):
         self._partition = config.partition
         self._remote = bool(config.host)
 
-        # Extra config options
-        self._setup_commands: list[str] = config.extra.get("setup_commands", [])
+        # Typed python_env field (preferred)
+        self._python_env = config.python_env
+
+        # Legacy: setup_commands in extra dict — still honoured with a warning
+        legacy_setup: list[str] = config.extra.get("setup_commands", [])
+        if legacy_setup:
+            self.logger.warning(
+                "Executor '%s': 'extra.setup_commands' is deprecated. "
+                "Move setup commands to 'python_env.setup_commands' instead.",
+                name,
+            )
+        self._legacy_setup_commands = legacy_setup
+
         self._extra_sbatch: list[str] = config.extra.get("extra_sbatch", [])
         self._mem: str | None = config.extra.get("mem")
         self._cpus_per_task: int | None = config.extra.get("cpus_per_task")
@@ -70,6 +81,13 @@ class SlurmExecutor(BaseExecutor):
     def submit(self, task_spec: TaskSpec) -> str:
         resources = task_spec.resources
 
+        # Resolve python environment: executor-level merged with task-level
+        task_python_env = task_spec.metadata.get("python_env")
+        merged_env = self._resolve_python_env(self._python_env, task_python_env)
+        setup_lines = self._env_to_shell_lines(merged_env) if merged_env else []
+        # Append any legacy setup_commands from extra: for backward compat
+        setup_lines = self._legacy_setup_commands + setup_lines
+
         script = generate_sbatch_script(
             command=task_spec.command,
             job_name=task_spec.metadata.get("job_name", "devrun_job"),
@@ -82,7 +100,7 @@ class SlurmExecutor(BaseExecutor):
             env=task_spec.env,
             extra_sbatch=self._extra_sbatch + resources.get("extra_sbatch", []),
             working_dir=task_spec.working_dir,
-            setup_commands=self._setup_commands,
+            setup_commands=setup_lines,
             output_dir=task_spec.working_dir,
         )
 

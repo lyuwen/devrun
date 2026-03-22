@@ -3,11 +3,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
 from devrun.executors.ssh import SSHExecutor
-from devrun.models import ExecutorEntry, TaskSpec
+from devrun.models import ExecutorEntry, PythonEnv, TaskSpec
 
 
-def _make_executor():
-    entry = ExecutorEntry(type="ssh", host="test.host.com", user="testuser")
+def _make_executor(python_env: PythonEnv | None = None):
+    entry = ExecutorEntry(type="ssh", host="test.host.com", user="testuser", python_env=python_env)
     return SSHExecutor(name="test_ssh", config=entry)
 
 
@@ -103,3 +103,86 @@ class TestSSHExecutorLogs:
             executor.logs("99999:mytoken123")
         assert "mytoken123" in captured[0], "log retrieval must use the token part of job_id"
         assert "99999" not in captured[0] or "mytoken123" in captured[0]
+
+
+class TestSSHExecutorPythonEnv:
+    def test_executor_level_venv_prepended_to_heredoc(self):
+        """Executor python_env.venv should appear before the command in the heredoc."""
+        executor = _make_executor(python_env=PythonEnv(venv="/opt/venv"))
+        captured = []
+        def capture(ssh, cmd, **kwargs):
+            captured.append(cmd)
+            return _make_ssh_result("42")
+        with patch("devrun.executors.ssh.run_ssh_command", side_effect=capture):
+            executor.submit(_make_spec(command="python train.py"))
+        heredoc_body = captured[0]
+        activate_pos = heredoc_body.find("source /opt/venv/bin/activate")
+        command_pos = heredoc_body.find("python train.py")
+        assert activate_pos != -1, "venv activation must appear in heredoc"
+        assert activate_pos < command_pos, "activation must come before the command"
+
+    def test_executor_level_conda_prepended(self):
+        executor = _make_executor(python_env=PythonEnv(conda="myenv"))
+        captured = []
+        def capture(ssh, cmd, **kwargs):
+            captured.append(cmd)
+            return _make_ssh_result("42")
+        with patch("devrun.executors.ssh.run_ssh_command", side_effect=capture):
+            executor.submit(_make_spec())
+        assert "conda activate myenv" in captured[0]
+
+    def test_executor_level_modules_prepended(self):
+        executor = _make_executor(python_env=PythonEnv(modules=["python/3.11", "cuda/12.1"]))
+        captured = []
+        def capture(ssh, cmd, **kwargs):
+            captured.append(cmd)
+            return _make_ssh_result("42")
+        with patch("devrun.executors.ssh.run_ssh_command", side_effect=capture):
+            executor.submit(_make_spec())
+        assert "module load python/3.11" in captured[0]
+        assert "module load cuda/12.1" in captured[0]
+
+    def test_task_level_env_overrides_executor_conda(self):
+        """Task python_env.conda should override executor's conda."""
+        executor = _make_executor(python_env=PythonEnv(conda="executor_env"))
+        task_env = PythonEnv(conda="task_env")
+        spec = _make_spec(metadata={"python_env": task_env})
+        captured = []
+        def capture(ssh, cmd, **kwargs):
+            captured.append(cmd)
+            return _make_ssh_result("42")
+        with patch("devrun.executors.ssh.run_ssh_command", side_effect=capture):
+            executor.submit(spec)
+        assert "conda activate task_env" in captured[0]
+        assert "conda activate executor_env" not in captured[0]
+
+    def test_task_setup_commands_appended_after_executor(self):
+        executor = _make_executor(python_env=PythonEnv(setup_commands=["export EXECUTOR_VAR=1"]))
+        task_env = PythonEnv(setup_commands=["export TASK_VAR=2"])
+        spec = _make_spec(metadata={"python_env": task_env})
+        captured = []
+        def capture(ssh, cmd, **kwargs):
+            captured.append(cmd)
+            return _make_ssh_result("42")
+        with patch("devrun.executors.ssh.run_ssh_command", side_effect=capture):
+            executor.submit(spec)
+        body = captured[0]
+        executor_pos = body.find("EXECUTOR_VAR=1")
+        task_pos = body.find("TASK_VAR=2")
+        assert executor_pos != -1 and task_pos != -1
+        assert executor_pos < task_pos, "executor setup_commands must come before task setup_commands"
+
+    def test_no_python_env_no_preamble(self):
+        """When neither executor nor task has python_env, no extra lines are added."""
+        executor = _make_executor(python_env=None)
+        captured = []
+        def capture(ssh, cmd, **kwargs):
+            captured.append(cmd)
+            return _make_ssh_result("42")
+        with patch("devrun.executors.ssh.run_ssh_command", side_effect=capture):
+            executor.submit(_make_spec(command="python train.py"))
+        body = captured[0]
+        assert "source " not in body
+        assert "conda activate" not in body
+        assert "module load" not in body
+

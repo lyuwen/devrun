@@ -2,6 +2,15 @@
 task: swe_bench_eval
 executor: slurm
 
+# python_env: activate the Python environment on the remote cluster.
+# Uncomment and fill in as needed. Merges over the executor's python_env.
+#
+# python_env:
+#   conda: swe_bench          # override the executor's default env for this task
+#   modules: [python/3.11]
+#   setup_commands:
+#     - export PYTHONUNBUFFERED=1
+
 params:
   # REQUIRED: override these on the command line or in a local config layer:
   #   devrun run swe_bench_eval/slurm \

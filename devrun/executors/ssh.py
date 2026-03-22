@@ -24,6 +24,7 @@ class SSHExecutor(BaseExecutor):
             user=config.user,
             key_file=config.key_file,
         )
+        self._python_env = config.python_env
 
     def submit(self, task_spec: TaskSpec) -> str:
         # Bug 3 fix: shell-quote env values
@@ -38,10 +39,16 @@ class SSHExecutor(BaseExecutor):
         run_token = uuid.uuid4().hex[:12]
         remote_log = f"/tmp/devrun_ssh_{run_token}.log"
 
+        # Build environment preamble (executor-level merged with task-level)
+        task_python_env = task_spec.metadata.get("python_env")
+        merged_env = self._resolve_python_env(self._python_env, task_python_env)
+        setup_lines = self._env_to_shell_lines(merged_env) if merged_env else []
+
         # Bug 2 fix: use a heredoc so single quotes inside full_cmd are safe
+        body = "\n".join(setup_lines + [full_cmd])
         remote_cmd = (
             f"nohup bash << 'DEVRUN_EOF' > {remote_log} 2>&1 &\n"
-            f"{full_cmd}\n"
+            f"{body}\n"
             f"DEVRUN_EOF\n"
             f"echo $!"
         )
