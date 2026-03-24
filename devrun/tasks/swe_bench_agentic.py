@@ -72,7 +72,12 @@ class SWEBenchAgenticTask(BaseTask):
         max_iterations = params.get("max_iterations", 100)
         select_dir = params.get("select_dir", "job_array")
         workspace = params.get("workspace", "docker")
-        task_id_format = params.get("task_id_format", "%03d")
+        task_id_format = params.get("task_id_format", "%05d")
+        base_url = params.get("base_url")
+        api_key = params.get("api_key")
+        temperature = params.get("temperature")
+        top_p = params.get("top_p")
+        
         array = params.get("array")
         concurrency_limit = params.get("concurrency_limit")
         
@@ -92,21 +97,39 @@ class SWEBenchAgenticTask(BaseTask):
         for cmd in env_commands:
             command_lines.append(cmd)
             
+        # Export key variables for use in llm_config template and shell logic
         command_lines.extend([
             "",
-            f"DATASET={dataset}",
+            f"export DATASET={dataset}",
+            f"export MODEL_NAME={model_name or ''}",
+            f"export BASE_URL={base_url or ''}",
+            f"export API_KEY={api_key or ''}",
+            f"export TEMPERATURE={temperature or ''}",
+            f"export TOP_P={top_p or ''}",
+            f"export DIRNAME={run_name or ''}",
+            f"export MAX_ITER={max_iterations}",
+        ])
+        
+        # Export any additional environment variables from params.env
+        # These will also be exported by SlurmExecutor via TaskSpec.env, 
+        # but having them in the script is good for transparency and shell expansion.
+        env_vars = params.get("env", {})
+        for k, v in env_vars.items():
+            command_lines.append(f"export {k}={v}")
+
+        command_lines.extend([
             "",
             f'num=$(printf "{task_id_format}\\n" ${{SLURM_ARRAY_TASK_ID:-0}})',
-            f'OUTPUT_PATH="{output_dir}/${{num}}"',
-            f'mkdir -p "${{OUTPUT_PATH}}"',
-            f'echo "Processing ${{num}} -> ${{OUTPUT_PATH}}"',
+            f'OUTPUT_PATH="${{DIRNAME}}/${{num}}"',
+            f'mkdir -p "logs/${{OUTPUT_PATH}}"',
+            f'echo "Processing ${{num}} -> logs/${{OUTPUT_PATH}}"',
             f'python {script} {llm_config} \\',
             f'    --dataset ${{DATASET}} \\',
             f'    --split {split} \\',
-            f'    --max-iterations {max_iterations} \\',
+            f'    --max-iterations ${{MAX_ITER}} \\',
             f'    --select {select_dir}/${{num}}.txt \\',
             f'    --workspace {workspace} \\',
-            f'    --output-dir "${{OUTPUT_PATH}}" \\'
+            f'    --output-dir "logs/${{OUTPUT_PATH}}" \\'
         ])
         
         # Append the extra flags

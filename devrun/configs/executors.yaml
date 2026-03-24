@@ -29,6 +29,10 @@ ssh_dev:
   type: ssh
   host: dev-server.company.com
   user: dev
+  extra:
+    setup_commands:
+      - . /path/to/conda/bin/activate
+      - conda activate swebench
 
 inference_cluster:
   type: http

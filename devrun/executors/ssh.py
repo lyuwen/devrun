@@ -21,12 +21,17 @@ class SSHExecutor(BaseExecutor):
             user=config.user,
             key_file=config.key_file,
         )
+        self._setup_commands: list[str] = config.extra.get("setup_commands", [])
 
     def submit(self, task_spec: TaskSpec) -> str:
         env_prefix = " ".join(f"{k}={v}" for k, v in task_spec.env.items())
         full_cmd = f"{env_prefix} {task_spec.command}".strip()
         if task_spec.working_dir:
             full_cmd = f"cd {task_spec.working_dir} && {full_cmd}"
+            
+        if self._setup_commands:
+            setup_str = " && ".join(self._setup_commands)
+            full_cmd = f"{setup_str} && {full_cmd}"
 
         # Launch in background, capture PID
         remote_cmd = f"nohup bash -c '{full_cmd}' > /tmp/devrun_ssh_$$.log 2>&1 & echo $!"
