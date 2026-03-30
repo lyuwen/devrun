@@ -64,18 +64,19 @@ class PythonEnv(BaseModel):
     Fields are applied in this order when generating shell preamble lines:
     1. ``modules`` — ``module load <name>`` for each entry (HPC module system)
     2. ``venv``    — ``source <venv>/bin/activate``
-    3. ``conda``   — ``conda activate <name>``
+    3. ``conda``   — ``conda activate <name>`` (or ``. <conda_path>/bin/activate <name>`` if ``conda_path`` is set)
     4. ``setup_commands`` — arbitrary shell lines (run last)
 
     At the executor level this defines the default environment for all jobs on
     that executor.  At the task level it *merges over* the executor value:
-    ``venv`` / ``conda`` replace the executor's value; ``modules`` replace the
-    executor's list entirely; ``setup_commands`` are *appended* to the
-    executor's list.
+    ``venv`` / ``conda`` / ``conda_path`` replace the executor's value;
+    ``modules`` replace the executor's list entirely; ``setup_commands`` are
+    *appended* to the executor's list.
     """
 
     venv: str | None = Field(default=None, description="Path to venv root or its activate script")
     conda: str | None = Field(default=None, description="Conda environment name to activate")
+    conda_path: str | None = Field(default=None, description="Path to conda installation (e.g. /opt/conda). When set, uses '. <conda_path>/bin/activate <conda>' instead of 'conda activate <conda>'")
     modules: list[str] = Field(default_factory=list, description="HPC modules to load (module load ...)")
     setup_commands: list[str] = Field(default_factory=list, description="Arbitrary shell lines run after env activation")
 

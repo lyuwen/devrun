@@ -25,6 +25,7 @@ class TestPythonEnvModel:
         env = PythonEnv()
         assert env.venv is None
         assert env.conda is None
+        assert env.conda_path is None
         assert env.modules == []
         assert env.setup_commands == []
 
@@ -32,11 +33,13 @@ class TestPythonEnvModel:
         env = PythonEnv(
             venv="/opt/venv",
             conda="myenv",
+            conda_path="/opt/conda",
             modules=["python/3.11", "cuda/12.1"],
             setup_commands=["export FOO=bar"],
         )
         assert env.venv == "/opt/venv"
         assert env.conda == "myenv"
+        assert env.conda_path == "/opt/conda"
         assert env.modules == ["python/3.11", "cuda/12.1"]
         assert env.setup_commands == ["export FOO=bar"]
 
@@ -60,6 +63,10 @@ class TestEnvToShellLines:
     def test_conda(self):
         lines = to_lines(PythonEnv(conda="myenv"))
         assert lines == ["conda activate myenv"]
+
+    def test_conda_with_conda_path(self):
+        lines = to_lines(PythonEnv(conda="myenv", conda_path="/opt/conda"))
+        assert lines == [". /opt/conda/bin/activate myenv"]
 
     def test_single_module(self):
         lines = to_lines(PythonEnv(modules=["python/3.11"]))
@@ -124,6 +131,15 @@ class TestResolvePythonEnv:
         )
         assert result is not None
         assert result.venv == "/task/venv"
+
+    def test_task_conda_path_overrides_executor(self):
+        result = resolve(
+            PythonEnv(conda="myenv", conda_path="/opt/conda"),
+            PythonEnv(conda_path="/usr/local/conda"),
+        )
+        assert result is not None
+        assert result.conda == "myenv"
+        assert result.conda_path == "/usr/local/conda"
 
     def test_executor_conda_kept_when_task_has_none(self):
         result = resolve(

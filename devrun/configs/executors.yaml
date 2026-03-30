@@ -15,6 +15,7 @@ slurm:
   #   modules: [python/3.11, cuda/12.1]   # HPC: module load ...
   #   venv: /path/to/venv                 # source <venv>/bin/activate
   #   conda: myenv                         # conda activate myenv
+  #   conda_path: /opt/conda               # optional: use '. <conda_path>/bin/activate <conda>' when conda isn't on PATH
   #   setup_commands:                      # arbitrary lines run last
   #     - export PYTHONUNBUFFERED=1
   extra:
@@ -37,6 +38,7 @@ slurm:
 #   python_env:
 #     modules: [python/3.11, cuda/12.1]
 #     conda: myenv
+#     conda_path: /opt/conda
 
 ssh_dev:
   type: ssh

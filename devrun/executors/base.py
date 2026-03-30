@@ -79,7 +79,7 @@ class BaseExecutor(ABC):
         """Merge executor-level and task-level PythonEnv.
 
         Merge semantics:
-        - ``venv`` / ``conda``: task value wins if set, else executor value.
+        - ``venv`` / ``conda`` / ``conda_path``: task value wins if set, else executor value.
         - ``modules``: task list replaces executor list entirely if non-empty.
         - ``setup_commands``: executor list prepended to task list (both kept).
         """
@@ -90,6 +90,7 @@ class BaseExecutor(ABC):
         return PythonEnv(
             venv=override.venv or base.venv,
             conda=override.conda or base.conda,
+            conda_path=override.conda_path or base.conda_path,
             modules=override.modules if override.modules else base.modules,
             setup_commands=base.setup_commands + override.setup_commands,
         )
@@ -108,6 +109,9 @@ class BaseExecutor(ABC):
             activate = env.venv if env.venv.endswith("activate") else f"{env.venv}/bin/activate"
             lines.append(f"source {activate}")
         if env.conda:
-            lines.append(f"conda activate {env.conda}")
+            if env.conda_path:
+                lines.append(f". {env.conda_path}/bin/activate {env.conda}")
+            else:
+                lines.append(f"conda activate {env.conda}")
         lines.extend(env.setup_commands)
         return lines
