@@ -26,8 +26,11 @@ params:
   max_iterations: 100
   select_dir: job_array
   workspace: docker
-  task_id_format: "%03d"
-
+  task_id_format: "%03d"      # e.g. %05d for 00001
+  
+  # Optional: override the inference script path
+  # run_script: benchmarks/swesmith/run_infer.py
+  
   # Slurm specific routing options
   array: "000-499"
   concurrency_limit: 10
@@ -37,10 +40,14 @@ params:
   mem: "32G"
   walltime: "24:00:00"
   job_name: "openhands-eval"
-
-  # Forward SLURM_ARRAY_TASK_ID or set a default one if running locally
+  
+  # Environment variables exported to the Slurm script and Python process
+  # These can be used in llm_config templates via ${oc.env:VAR_NAME}
   env:
     OH_SEND_REASONING_CONTENT: "yes"
+    EVAL_AGENT_SERVER_IMAGE: "harbor.zhejianglab.com/zj021/openhands-eval-agent-server"
+    # TEMPERATURE: "1.0"
+    # TOP_P: "0.95"
 
   # Provide setup commands for bash environment before running Python
   env_commands: []
