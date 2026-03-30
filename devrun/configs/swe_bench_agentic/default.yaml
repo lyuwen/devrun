@@ -2,15 +2,25 @@
 task: swe_bench_agentic
 executor: slurm
 
+# python_env: activate the Python environment on the remote cluster.
+# Uncomment and fill in as needed. Merges over the executor's python_env.
+#
+# python_env:
+#   modules: [python/3.11, cuda/12.1]
+#   conda: openhands
+#   venv: /path/to/venv
+#   setup_commands:
+#     - export PYTHONUNBUFFERED=1
+
 params:
   model_name: "example_model" # Derives llm_config to .llm_config/example_model.json
   run_name: "run1"            # Derives output_dir to logs/run1
-  
+
   # llm_config can be an absolute path string to a JSON file, or a full dictionary:
   # llm_config:
-  #   model: "litellm_proxy/anthropic/claude-sonnet-4-20250514"
+  #   model: "litellm_proxy/anthropic/claude-opus-4-5-20251101"
   #   api_key: "YOUR_API_KEY"
-  
+
   dataset: ""                 # Provide absolute path to dataset
   split: test
   max_iterations: 100
@@ -24,6 +34,7 @@ params:
   # Slurm specific routing options
   array: "000-499"
   concurrency_limit: 10
+  oversubscribe: false
   partition: "agent"
   cpus_per_task: 4
   mem: "32G"

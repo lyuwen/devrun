@@ -89,7 +89,7 @@ class LocalExecutor(BaseExecutor):
 
         return "unknown"
 
-    def logs(self, job_id: str) -> str:
+    def logs(self, job_id: str, log_path: str | None = None) -> str:
         # Check standard format
         log_file = _LOG_DIR / f"{job_id}.log"
         if log_file.exists():

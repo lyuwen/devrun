@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,7 @@ class JobStore:
     ) -> str:
         """Insert a new job and return its ``job_id``."""
         job_id = uuid.uuid4().hex[:12]
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             "INSERT INTO jobs (job_id, task_name, executor, parameters, status, created_at, log_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -96,10 +96,15 @@ class JobStore:
         row = self._conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
         return self._row_to_record(row) if row else None
 
-    def list_all(self, limit: int = 50) -> list[JobRecord]:
-        rows = self._conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+    def list_all(self, limit: int | None = None) -> list[JobRecord]:
+        if limit is None:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [self._row_to_record(r) for r in rows]
 
     def get_by_remote_id(self, remote_job_id: str) -> JobRecord | None:

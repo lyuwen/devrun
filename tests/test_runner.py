@@ -197,6 +197,7 @@ class TestRunnerRun:
             with patch("devrun.runner.resolve_executor") as mock_resolve:
                 mock_executor = MagicMock()
                 mock_executor.submit.return_value = "mock_job_123"
+                mock_executor.submit_with_retry.return_value = "mock_job_123"
                 mock_resolve.return_value = mock_executor
 
                 runner = TaskRunner(
@@ -246,6 +247,7 @@ class TestRunnerRun:
             with patch("devrun.runner.resolve_executor") as mock_resolve:
                 mock_executor = MagicMock()
                 mock_executor.submit.return_value = "mock_job"
+                mock_executor.submit_with_retry.return_value = "mock_job"
                 mock_resolve.return_value = mock_executor
 
                 runner = TaskRunner(
@@ -431,6 +433,7 @@ class TestRunnerIntegration:
             with patch("devrun.runner.resolve_executor") as mock_resolve:
                 mock_executor = MagicMock()
                 mock_executor.submit.return_value = "remote_job_123"
+                mock_executor.submit_with_retry.return_value = "remote_job_123"
                 mock_resolve.return_value = mock_executor
 
                 runner = TaskRunner(

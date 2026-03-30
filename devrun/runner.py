@@ -6,14 +6,14 @@ import itertools
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from devrun.db.jobs import JobStore
-from devrun.models import JobStatus, TaskConfig, TaskSpec
+from devrun.models import JobStatus, PythonEnv, TaskConfig, TaskSpec
 from devrun.registry import get_task_class
 from devrun.router import resolve_executor, load_executor_configs
 
@@ -95,7 +95,7 @@ class TaskRunner:
             if dry_run:
                 logger.info("DRY RUN: Would submit task='%s', executor='%s', params=%s", cfg.task, cfg.executor, params)
             else:
-                job_id = self._submit_single(cfg.task, cfg.executor, params)
+                job_id = self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env)
                 job_ids.append(job_id)
 
         return job_ids
@@ -114,7 +114,7 @@ class TaskRunner:
                 live_status = executor.status(remote_id)
                 mapped = self._map_status(live_status)
                 if mapped != record.status:
-                    completed_at = datetime.utcnow() if mapped in (JobStatus.COMPLETED, JobStatus.FAILED) else None
+                    completed_at = datetime.now(timezone.utc) if mapped in (JobStatus.COMPLETED, JobStatus.FAILED) else None
                     self._db.update_status(job_id, mapped, completed_at=completed_at)
                     record = self._db.get(job_id)
             except Exception as exc:
@@ -130,7 +130,8 @@ class TaskRunner:
         try:
             executor = resolve_executor(record.executor, self.executor_configs)
             remote_id = record.remote_job_id or job_id
-            return executor.logs(remote_id)
+            log_path = record.log_path
+            return executor.logs(remote_id, log_path=log_path)
         except Exception as exc:
             return f"Error fetching logs: {exc}"
 
@@ -173,7 +174,7 @@ class TaskRunner:
             executor = resolve_executor(record.executor, self.executor_configs)
             remote_id = record.remote_job_id or job_id
             executor.cancel(remote_id)
-            self._db.update_status(job_id, JobStatus.CANCELLED, completed_at=datetime.utcnow())
+            self._db.update_status(job_id, JobStatus.CANCELLED, completed_at=datetime.now(timezone.utc))
             logger.info("Job %s cancelled successfully.", job_id)
         except Exception as exc:
             logger.error("Failed to cancel job %s: %s", job_id, exc)
@@ -217,12 +218,16 @@ class TaskRunner:
         logger.info("Sweep expanded to %d combinations", len(combos))
         return combos
 
-    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any]) -> str:
+    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> str:
         """Prepare and submit one job."""
         # 1. Resolve task plugin
         task_cls = get_task_class(task_name)
         task = task_cls()
         task_spec: TaskSpec = task.prepare(params)
+
+        # 2. Propagate task-level python_env into metadata for executors to consume
+        if python_env is not None:
+            task_spec.metadata["python_env"] = python_env
 
         # 2. Record in DB
         job_id = self._db.insert(task_name, executor_name, params)
@@ -231,14 +236,15 @@ class TaskRunner:
         try:
             executor = resolve_executor(executor_name, self.executor_configs)
             self._db.update_status(job_id, JobStatus.SUBMITTED)
-            remote_job_id = executor.submit(task_spec)
-            self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id)
+            remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
+            log_path = task_spec.metadata.get("log_path")
+            self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
             logger.info(
                 "Job %s submitted → executor=%s, remote_id=%s",
                 job_id, executor_name, remote_job_id,
             )
         except Exception as exc:
-            self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.utcnow())
+            self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
             logger.error("Job %s failed to submit: %s", job_id, exc)
             raise
 
@@ -255,5 +261,15 @@ class TaskRunner:
             "failed": JobStatus.FAILED,
             "cancelled": JobStatus.CANCELLED,
             "timeout": JobStatus.FAILED,
+            "completing": JobStatus.RUNNING,
+            "node_fail": JobStatus.FAILED,
+            "out_of_memory": JobStatus.FAILED,
+            "preempted": JobStatus.FAILED,
+            "boot_fail": JobStatus.FAILED,
+            "deadline": JobStatus.FAILED,
+            "stopped": JobStatus.FAILED,
+            "suspended": JobStatus.RUNNING,
+            "requeued": JobStatus.PENDING,
+            "resizing": JobStatus.RUNNING,
         }
         return mapping.get(raw.lower(), JobStatus.UNKNOWN)

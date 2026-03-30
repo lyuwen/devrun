@@ -8,8 +8,18 @@ local:
 slurm:
   type: slurm
   partition: agent
+  # python_env: configure the Python environment activated before every job.
+  # All fields are optional; combine freely.
+  #
+  # python_env:
+  #   modules: [python/3.11, cuda/12.1]   # HPC: module load ...
+  #   venv: /path/to/venv                 # source <venv>/bin/activate
+  #   conda: myenv                         # conda activate myenv
+  #   setup_commands:                      # arbitrary lines run last
+  #     - export PYTHONUNBUFFERED=1
   extra:
-    # Commands run before the main task is executed (e.g. activating environments)
+    # Legacy: setup_commands in extra is still supported but deprecated.
+    # Prefer python_env.setup_commands above instead.
     # setup_commands:
     #   - source /path/to/conda/activate
     #   - conda activate myenv
@@ -24,15 +34,18 @@ slurm:
 #   host: cluster-a.company.com
 #   user: dev
 #   partition: gpu
+#   python_env:
+#     modules: [python/3.11, cuda/12.1]
+#     conda: myenv
 
 ssh_dev:
   type: ssh
   host: dev-server.company.com
   user: dev
-  extra:
-    setup_commands:
-      - . /path/to/conda/bin/activate
-      - conda activate swebench
+  # python_env:
+  #   venv: /home/dev/projects/myproject/.venv
+  #   setup_commands:
+  #     - export PYTHONUNBUFFERED=1
 
 inference_cluster:
   type: http

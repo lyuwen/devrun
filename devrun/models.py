@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -55,6 +55,29 @@ class TaskConfig(BaseModel):
     executor: str = Field(..., description="Executor name from executors.yaml")
     params: dict[str, Any] = Field(default_factory=dict)
     sweep: dict[str, list[Any]] | None = Field(default=None, description="Optional parameter sweep")
+    python_env: PythonEnv | None = Field(default=None, description="Per-task Python environment (merges over executor's python_env)")
+
+
+class PythonEnv(BaseModel):
+    """Describes how to activate a Python environment on a remote host.
+
+    Fields are applied in this order when generating shell preamble lines:
+    1. ``modules`` — ``module load <name>`` for each entry (HPC module system)
+    2. ``venv``    — ``source <venv>/bin/activate``
+    3. ``conda``   — ``conda activate <name>``
+    4. ``setup_commands`` — arbitrary shell lines (run last)
+
+    At the executor level this defines the default environment for all jobs on
+    that executor.  At the task level it *merges over* the executor value:
+    ``venv`` / ``conda`` replace the executor's value; ``modules`` replace the
+    executor's list entirely; ``setup_commands`` are *appended* to the
+    executor's list.
+    """
+
+    venv: str | None = Field(default=None, description="Path to venv root or its activate script")
+    conda: str | None = Field(default=None, description="Conda environment name to activate")
+    modules: list[str] = Field(default_factory=list, description="HPC modules to load (module load ...)")
+    setup_commands: list[str] = Field(default_factory=list, description="Arbitrary shell lines run after env activation")
 
 
 class ExecutorEntry(BaseModel):
@@ -66,6 +89,7 @@ class ExecutorEntry(BaseModel):
     partition: str | None = None
     endpoint: str | None = None
     key_file: str | None = None
+    python_env: PythonEnv | None = Field(default=None, description="Python environment setup for remote jobs")
     extra: dict[str, Any] = Field(default_factory=dict, description="Catch-all for executor-specific options")
 
 
@@ -83,7 +107,7 @@ class JobRecord(BaseModel):
     parameters: str = ""  # JSON-encoded params
     remote_job_id: str | None = None
     status: JobStatus = JobStatus.PENDING
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     log_path: str | None = None
 

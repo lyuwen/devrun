@@ -61,7 +61,7 @@ class HTTPExecutor(BaseExecutor):
             self.logger.error("Failed to query status: %s", exc)
             return "unknown"
 
-    def logs(self, job_id: str) -> str:
+    def logs(self, job_id: str, log_path: str | None = None) -> str:
         try:
             resp = requests.get(
                 f"{self._endpoint}/job_logs/{job_id}",
