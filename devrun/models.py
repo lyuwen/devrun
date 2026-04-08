@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +92,51 @@ class ExecutorEntry(BaseModel):
     key_file: str | None = None
     python_env: PythonEnv | None = Field(default=None, description="Python environment setup for remote jobs")
     extra: dict[str, Any] = Field(default_factory=dict, description="Catch-all for executor-specific options")
+
+
+# ---------------------------------------------------------------------------
+# Workflow models
+# ---------------------------------------------------------------------------
+
+
+class WorkflowStage(BaseModel):
+    """One stage in a workflow pipeline."""
+
+    name: str = Field(..., description="Unique stage identifier")
+    task: str = Field(..., description="Task plugin name")
+    executor: str = Field(..., description="Executor name from executors.yaml")
+    params: dict[str, Any] = Field(default_factory=dict)
+    depends_on: str | list[str] | None = Field(default=None, description="Stage name(s) that must complete first")
+    python_env: PythonEnv | None = Field(default=None)
+    sweep: dict[str, list[Any]] | None = Field(default=None)
+
+
+class WorkflowConfig(BaseModel):
+    """Schema for a workflow YAML file."""
+
+    workflow: str = Field(..., description="Workflow name")
+    stages: list[WorkflowStage] = Field(..., description="Ordered list of stages")
+    params: dict[str, Any] = Field(default_factory=dict, description="Shared params for OmegaConf interpolation")
+    timeout: float = Field(default=48 * 3600, description="Max wall-clock seconds (default 48h)")
+    heartbeat_interval: float = Field(default=30.0, description="Poll interval in seconds")
+
+    @model_validator(mode="after")
+    def _validate_depends_on_references(self) -> "WorkflowConfig":
+        """Ensure all depends_on references point to existing stage names."""
+        stage_names = {s.name for s in self.stages}
+        for stage in self.stages:
+            deps = stage.depends_on
+            if deps is None:
+                continue
+            if isinstance(deps, str):
+                deps = [deps]
+            for dep in deps:
+                if dep not in stage_names:
+                    raise ValueError(
+                        f"Stage '{stage.name}' depends_on '{dep}' "
+                        f"which does not exist. Available stages: {sorted(stage_names)}"
+                    )
+        return self
 
 
 # ---------------------------------------------------------------------------
