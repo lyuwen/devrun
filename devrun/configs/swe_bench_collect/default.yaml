@@ -1,0 +1,12 @@
+# configs/swe_bench_collect/default.yaml
+task: swe_bench_collect
+executor: local
+
+params:
+  output_dir: ""           # Root output directory from inference (e.g., logs/run1)
+  dataset: ""              # Dataset path (used to derive DS_DIR)
+  split: test
+  model_name_or_path: ""   # Model identifier for prediction records
+  predictions_path: predictions.jsonl
+  # working_dir:           # Working directory for remote execution
+  # array: "000-499"       # Optional: scope scan to array range
