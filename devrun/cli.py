@@ -12,6 +12,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+import yaml
+
 from devrun.runner import TaskRunner
 from devrun.registry import list_tasks, list_executors
 from devrun.utils.sync import sync_to_remote, fetch_from_remote
@@ -326,6 +328,159 @@ def fetch(
             console.print(result.stdout)
     else:
         console.print(f"[red]✗ Fetch failed:[/red] {result.stderr}")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# Workflow subcommands
+# ---------------------------------------------------------------------------
+
+
+workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows.")
+app.add_typer(workflow_app, name="workflow")
+
+
+@workflow_app.command("run")
+def workflow_run(
+    config_path: str = typer.Argument(..., help="Path to workflow YAML config"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run a multi-stage workflow from a YAML config."""
+    _setup_logging(verbose)
+
+    config_file = Path(config_path)
+    if not config_file.exists():
+        console.print(f"[red]Error:[/red] Config not found: {config_path}")
+        raise typer.Exit(code=1)
+
+    from devrun.models import WorkflowConfig
+
+    with open(config_file) as fh:
+        raw = yaml.safe_load(fh)
+
+    try:
+        cfg = WorkflowConfig(**raw)
+    except Exception as exc:
+        console.print(f"[red]Error parsing workflow config:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    result = runner.run(cfg, dry_run=dry_run)
+
+    if dry_run:
+        console.print(result)
+        console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
+    else:
+        console.print(f"[green]Workflow completed:[/green] {result}")
+
+
+@workflow_app.command("status")
+def workflow_status(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to query"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Check status of a workflow."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    record = runner.status(workflow_id)
+    if not record:
+        console.print(f"[red]Workflow {workflow_id} not found.[/red]")
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"Workflow {workflow_id}")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Name", record["workflow_name"])
+    table.add_row("Status", record["status"])
+    table.add_row("Created", record["created_at"])
+    table.add_row("Completed", record.get("completed_at") or "—")
+
+    stages = json.loads(record.get("stages_state", "{}"))
+    for name, state in stages.items():
+        status_str = state.get("status", "unknown")
+        job_id = state.get("job_id", "—")
+        table.add_row(f"  Stage: {name}", f"{status_str} (job: {job_id})")
+
+    console.print(table)
+
+
+@workflow_app.command("list")
+def workflow_list(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max workflows to show"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """List recent workflows."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    records = runner.list_workflows(limit=limit)
+
+    if not records:
+        console.print("[dim]No workflows found.[/dim]")
+        return
+
+    table = Table(title="Recent Workflows")
+    table.add_column("ID", style="bold")
+    table.add_column("Name", style="cyan")
+    table.add_column("Status")
+    table.add_column("Created")
+
+    for rec in records:
+        status_val = rec.get("status", "unknown")
+        style = {"completed": "green", "failed": "red", "running": "yellow", "timed_out": "red"}.get(status_val, "dim")
+        table.add_row(
+            rec["workflow_id"],
+            rec["workflow_name"],
+            f"[{style}]{status_val}[/{style}]",
+            rec.get("created_at", ""),
+        )
+    console.print(table)
+
+
+@workflow_app.command("logs")
+def workflow_logs(
+    workflow_id: str = typer.Argument(..., help="Workflow ID"),
+    stage: Optional[str] = typer.Option(None, "--stage", "-s", help="Specific stage name"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Show logs for a workflow or specific stage."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    try:
+        output = runner.logs(workflow_id, stage=stage)
+        console.print(output)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+
+@workflow_app.command("cancel")
+def workflow_cancel(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to cancel"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Cancel all active stages of a workflow."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    try:
+        runner.cancel(workflow_id)
+        console.print(f"[green]Workflow {workflow_id} cancelled.[/green]")
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
 
