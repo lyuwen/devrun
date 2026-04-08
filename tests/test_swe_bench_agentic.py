@@ -75,9 +75,51 @@ class TestSWEBenchAgenticTask:
     def test_filesystem_check_skipped_for_remote(self):
         """Missing local files should not raise - just warn."""
         task = SWEBenchAgenticTask()
-        # Should NOT raise FileNotFoundError even if paths don't exist
         spec = task.prepare(_make_params(
             llm_config="/nonexistent/config.json",
             dataset="/nonexistent/dataset",
         ))
         assert spec is not None
+
+    def test_prepare_retry_loop_in_command(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert "for attempt in" in spec.command
+
+    def test_prepare_completion_check_in_command(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert "output.jsonl" in spec.command
+
+    def test_prepare_max_attempts_default(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert "{1..5}" in spec.command
+
+    def test_prepare_max_attempts_custom(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(max_attempts=3))
+        assert "{1..3}" in spec.command
+
+    def test_prepare_ds_dir_auto_derived(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(dataset="/fake/dataset", split="test"))
+        assert "__fake__dataset-test" in spec.command
+
+    def test_prepare_ds_dir_override(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(ds_dir="custom_ds_dir"))
+        assert "custom_ds_dir" in spec.command
+
+    def test_prepare_set_e_false_in_metadata(self):
+        """The agentic task must set set_e=False so retry loop works."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert spec.metadata.get("set_e") is False
+
+    def test_prepare_failed_run_archiving(self):
+        """Command should include logic to archive failed previous runs."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert "/old/" in spec.command
+        assert "date" in spec.command

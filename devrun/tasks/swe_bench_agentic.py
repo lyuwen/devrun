@@ -8,6 +8,8 @@ from typing import Any
 from devrun.models import TaskSpec
 from devrun.registry import register_task
 from devrun.tasks.base import BaseTask
+from devrun.utils.swebench import derive_ds_dir
+from devrun.utils.templates import render_template
 
 _agentic_logger = _logging.getLogger("devrun.tasks.swe_bench_agentic")
 
@@ -33,9 +35,8 @@ class SWEBenchAgenticTask(BaseTask):
         model_name = params.get("model_name")
         run_name = params.get("run_name")
 
+        # --- resolve llm_config ---
         llm_config = params.get("llm_config")
-
-        # If the user passed a dictionary directly into YAML, serialize it to a JSON file
         if isinstance(llm_config, dict):
             import json
             from pathlib import Path
@@ -57,8 +58,6 @@ class SWEBenchAgenticTask(BaseTask):
             else:
                 raise ValueError("Either params.llm_config or params.model_name is required")
 
-        # Warn (but don't block) if the resolved config doesn't exist locally —
-        # it may exist on the remote host.
         from pathlib import Path
         if not Path(llm_config).is_file():
             _agentic_logger.warning(
@@ -66,6 +65,7 @@ class SWEBenchAgenticTask(BaseTask):
                 llm_config,
             )
 
+        # --- resolve output_dir and run_name ---
         output_dir = params.get("output_dir")
         if not output_dir:
             logs_dir = params.get("logs_dir", "logs")
@@ -75,19 +75,6 @@ class SWEBenchAgenticTask(BaseTask):
             output_dir = f"{logs_dir}/{run_name}"
 
         dataset = params.get("dataset")
-        split = params.get("split", "test")
-        max_iterations = params.get("max_iterations", 100)
-        select_dir = params.get("select_dir", "job_array")
-        workspace = params.get("workspace", "docker")
-        task_id_format = params.get("task_id_format", "%05d")
-        base_url = params.get("base_url")
-        api_key = params.get("api_key")
-        temperature = params.get("temperature")
-        top_p = params.get("top_p")
-        
-        array = params.get("array")
-        concurrency_limit = params.get("concurrency_limit")
-
         if not dataset:
             raise ValueError("params.dataset is required")
 
@@ -97,69 +84,56 @@ class SWEBenchAgenticTask(BaseTask):
                 dataset,
             )
 
+        split = params.get("split", "test")
+        max_iterations = params.get("max_iterations", 100)
+        max_attempts = params.get("max_attempts", 5)
+        select_dir = params.get("select_dir", "job_array")
+        workspace = params.get("workspace", "docker")
+        task_id_format = params.get("task_id_format", "%05d")
+        working_dir = params.get("working_dir")
+
+        # Derive DS_DIR (shared utility ensures consistency with collect task)
+        ds_dir = params.get("ds_dir") or derive_ds_dir(dataset, split)
+
         script = self._get_run_script(params)
         flags = self._get_default_flags(params)
-
         env_commands = params.get("env_commands", [])
-
-        # Bash automation to resolve the SLURM_ARRAY_TASK_ID into the formatted number
-        command_lines = []
-        for cmd in env_commands:
-            command_lines.append(cmd)
-            
-        # Export key variables for use in llm_config template and shell logic
-        command_lines.extend([
-            "",
-            f"export DATASET={dataset}",
-            f"export MODEL_NAME={model_name or ''}",
-            f"export BASE_URL={base_url or ''}",
-            f"export API_KEY={api_key or ''}",
-            f"export TEMPERATURE={temperature or ''}",
-            f"export TOP_P={top_p or ''}",
-            f"export DIRNAME={run_name or ''}",
-            f"export MAX_ITER={max_iterations}",
-        ])
-        
-        # Export any additional environment variables from params.env
-        # These will also be exported by SlurmExecutor via TaskSpec.env, 
-        # but having them in the script is good for transparency and shell expansion.
         env_vars = params.get("env", {})
-        for k, v in env_vars.items():
-            command_lines.append(f"export {k}={v}")
 
-        command_lines.extend([
-            "",
-            f'num=$(printf "{task_id_format}\\n" ${{SLURM_ARRAY_TASK_ID:-0}})',
-            f'OUTPUT_PATH="{output_dir}/${{num}}"',
-            f'mkdir -p "${{OUTPUT_PATH}}"',
-            f'echo "Processing ${{num}} -> ${{OUTPUT_PATH}}"',
-        ])
+        # Render the bash command via Jinja2 template
+        command = render_template(
+            "swe_bench_agentic.sh.j2",
+            working_dir=working_dir,
+            env_commands=env_commands,
+            dataset=dataset,
+            model_name=model_name or "",
+            base_url=params.get("base_url", ""),
+            api_key=params.get("api_key", ""),
+            temperature=params.get("temperature", ""),
+            top_p=params.get("top_p", ""),
+            run_name=run_name or "",
+            max_iterations=max_iterations,
+            ds_dir=ds_dir,
+            task_id_format=task_id_format,
+            output_dir=output_dir,
+            max_attempts=max_attempts,
+            script=script,
+            llm_config=llm_config,
+            split=split,
+            select_dir=select_dir,
+            workspace=workspace,
+            extra_flags=flags,
+            env_vars=env_vars,
+        )
 
-        # Build the python command with proper backslash continuation
-        python_args = [
-            f"python {script} {llm_config}",
-            f"    --dataset ${{DATASET}}",
-            f"    --split {split}",
-            f"    --max-iterations {max_iterations}",
-            f"    --select {select_dir}/${{num}}.txt",
-            f"    --workspace {workspace}",
-            f'    --output-dir "${{OUTPUT_PATH}}"',
-        ]
-        for flag in flags:
-            python_args.append(f"    {flag}")
-
-        python_cmd = " \\\n".join(python_args)
-        command_lines.append(python_cmd)
-
-        command = "\n".join(command_lines)
-
+        # --- resources and extra_sbatch ---
         resources = {}
-        # Parse standard slurm resources
         for k in ["nodes", "gpus_per_node", "gpus", "walltime", "partition", "mem", "cpus_per_task", "job_name"]:
             if k in params:
                 resources[k] = params[k]
 
-        # Forward the --array flag to Slurm via extra_sbatch
+        array = params.get("array")
+        concurrency_limit = params.get("concurrency_limit")
         extra_sbatch = []
         if array:
             array_str = str(array)
@@ -168,23 +142,21 @@ class SWEBenchAgenticTask(BaseTask):
             extra_sbatch.append(f"--array {array_str}")
             extra_sbatch.append("--output=slurm_logs/slurm-%A_%a.out")
             extra_sbatch.append("--error=slurm_logs/slurm-%A_%a.err")
-            # mkdir -p slurm_logs must be the first command in the script
-            command_lines.insert(0, "mkdir -p slurm_logs")
-            command = "\n".join(command_lines)
+            command = "mkdir -p slurm_logs\n" + command
 
         if params.get("oversubscribe", False):
             extra_sbatch.append("--oversubscribe")
 
         if extra_sbatch:
-            # We assume SlurmExecutor supports extra_sbatch injected via resources
             resources["extra_sbatch"] = extra_sbatch
-
-        working_dir = params.get("working_dir")
 
         return TaskSpec(
             command=command,
             resources=resources,
-            env=params.get("env", {}),
+            env=env_vars,
             working_dir=working_dir,
-            metadata={"job_name": resources.get("job_name", "swe_agentic")},
+            metadata={
+                "job_name": resources.get("job_name", "swe_agentic"),
+                "set_e": False,  # retry loop requires set -x only, not set -e
+            },
         )
