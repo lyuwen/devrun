@@ -184,15 +184,32 @@ def run(
 
 @app.command("list")
 def list_plugins() -> None:
-    """List available task and executor plugins."""
+    """List available task and executor plugins, including config variations."""
+    from devrun.runner import get_config_dirs
+
     table = Table(title="Registered Plugins")
     table.add_column("Type", style="cyan")
     table.add_column("Name", style="green")
+    table.add_column("Variations", style="dim")
+
+    # Collect variations per task by scanning config directories
+    config_dirs = get_config_dirs()
+    task_variations: dict[str, set[str]] = {}
+    for d in config_dirs:
+        if not d.is_dir():
+            continue
+        for child in d.iterdir():
+            if child.is_dir():
+                for yaml_file in child.glob("*.yaml"):
+                    stem = yaml_file.stem
+                    task_variations.setdefault(child.name, set()).add(stem)
 
     for name in list_tasks():
-        table.add_row("task", name)
+        variations = sorted(task_variations.get(name, set()))
+        variations_str = ", ".join(f"{name}/{v}" for v in variations if v != "default")
+        table.add_row("task", name, variations_str)
     for name in list_executors():
-        table.add_row("executor", name)
+        table.add_row("executor", name, "")
     console.print(table)
 
 

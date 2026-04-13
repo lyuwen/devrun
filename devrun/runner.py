@@ -20,6 +20,16 @@ from devrun.router import resolve_executor, load_executor_configs
 logger = logging.getLogger("devrun.runner")
 
 
+def get_config_dirs() -> list[Path]:
+    """Return the ordered list of config search directories (lowest → highest priority)."""
+    devrun_repo_root = Path(__file__).parent.parent
+    return [
+        devrun_repo_root / "devrun" / "configs",
+        Path.home() / ".devrun" / "configs",
+        Path.cwd() / ".devrun" / "configs",
+    ]
+
+
 class TaskRunner:
     """Loads task configs, expands sweeps, prepares tasks, and dispatches to executors."""
 
@@ -27,14 +37,7 @@ class TaskRunner:
         self._executors_path = executors_path
         self._executor_configs = None  # lazy
         self._db = JobStore(db_path)
-        # We need a stable reference to the installed repository's config directory.
-        # This allows devrun to be executed from anywhere while still finding default templates.
-        devrun_repo_root = Path(__file__).parent.parent
-        self._config_dirs = [
-            devrun_repo_root / "devrun" / "configs",
-            Path.home() / ".devrun" / "configs",
-            Path.cwd() / ".devrun" / "configs"
-        ]
+        self._config_dirs = get_config_dirs()
 
     # ---- lazy config loading ---------------------------------------------
 

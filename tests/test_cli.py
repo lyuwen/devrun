@@ -38,6 +38,15 @@ class TestCLIList:
         assert "eval" in result.stdout
         assert "local" in result.stdout
 
+    def test_list_shows_variations(self):
+        """Verify list command shows config variations."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["list"])
+
+        assert result.exit_code == 0
+        assert "Variations" in result.stdout
+        assert "swe_bench_eval/slurm" in result.stdout
+
 
 class TestCLIStatus:
     """Tests for the 'status' command."""
