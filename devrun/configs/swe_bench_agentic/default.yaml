@@ -24,6 +24,7 @@ params:
   dataset: ""                 # Provide absolute path to dataset
   split: test
   max_iterations: 100
+  run_infer_max_attempts: 5
   select_dir: job_array
   workspace: docker
   task_id_format: "%03d"      # e.g. %05d for 00001
@@ -45,9 +46,13 @@ params:
   # These can be used in llm_config templates via ${oc.env:VAR_NAME}
   env:
     OH_SEND_REASONING_CONTENT: "yes"
-    EVAL_AGENT_SERVER_IMAGE: "harbor.zhejianglab.com/zj021/openhands-eval-agent-server"
+    EVAL_AGENT_SERVER_IMAGE: "<your_docker_registry>/openhands-eval-agent-server"
     # TEMPERATURE: "1.0"
     # TOP_P: "0.95"
 
   # Provide setup commands for bash environment before running Python
   env_commands: []
+
+  # git safe.directory entries added before the main command
+  # git_safe_dirs:
+  #   - /path/to/repo

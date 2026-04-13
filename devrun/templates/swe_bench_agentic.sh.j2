@@ -4,17 +4,16 @@
    Required variables:
      dataset, model_name, base_url, api_key, temperature, top_p,
      run_name, max_iterations, ds_dir, task_id_format, output_dir,
-     max_attempts, script, llm_config, split, select_dir, workspace,
-     extra_flags, env_commands, env_vars
+     max_attempts, run_infer_max_attempts, script, llm_config, split,
+     select_dir, workspace, extra_flags, env_commands, env_vars,
+     git_safe_dirs
 
-   Optional variables:
-     working_dir (None to skip cd)
 #}
-{% if working_dir %}
-cd {{ working_dir | shell_quote }}
-{% endif %}
 {% for cmd in env_commands %}
 {{ cmd }}
+{% endfor %}
+{% for d in git_safe_dirs %}
+git config --global --add safe.directory {{ d | shell_quote }}
 {% endfor %}
 
 export DATASET={{ dataset | shell_quote }}
@@ -61,6 +60,7 @@ for attempt in {1..{{ max_attempts }}}; do
         --dataset ${DATASET} \
         --split {{ split }} \
         --max-iterations {{ max_iterations }} \
+        --max-attempts {{ run_infer_max_attempts }} \
         --select {{ select_dir }}/${num}.txt \
         --workspace {{ workspace }} \
         --output-dir "${OUTPUT_PATH}"{% for flag in extra_flags %} \

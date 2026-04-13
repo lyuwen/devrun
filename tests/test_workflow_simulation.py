@@ -137,12 +137,12 @@ class TestWorkflowSimulation:
         assert "predictions_path" in spec.command
 
     def test_inference_working_dir_in_command(self, swe_bench_config):
-        """The inference command should cd to working_dir."""
+        """The inference TaskSpec should set working_dir (executor handles cd)."""
         from devrun.tasks.swe_bench_agentic import SWEBenchAgenticTask
 
         task = SWEBenchAgenticTask()
         spec = task.prepare(swe_bench_config.stages[0].params)
-        assert "/remote/project" in spec.command
+        assert spec.working_dir == "/remote/project"
 
     def test_collect_working_dir_in_command(self, swe_bench_config):
         """The collect command should cd to working_dir."""

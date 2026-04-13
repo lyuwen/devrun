@@ -56,6 +56,7 @@ class TestSWEBenchAgenticTemplate:
             "task_id_format": "%03d",
             "output_dir": "logs/run1",
             "max_attempts": 5,
+            "run_infer_max_attempts": 5,
             "script": "benchmarks/swebench/run_infer.py",
             "llm_config": ".llm_config/test-model.json",
             "split": "test",
@@ -63,6 +64,7 @@ class TestSWEBenchAgenticTemplate:
             "workspace": "docker",
             "extra_flags": ["--use-legacy-tools", "--bind-dev-sdk"],
             "env_vars": {"OH_SEND_REASONING_CONTENT": "yes"},
+            "git_safe_dirs": [],
         }
 
     def test_contains_retry_loop(self, base_params):
@@ -88,17 +90,11 @@ class TestSWEBenchAgenticTemplate:
         result = render_template("swe_bench_agentic.sh.j2", **base_params)
         assert "__mnt__data__SWE-bench_Verified-test" in result
 
-    def test_contains_cd_working_dir(self, base_params):
+    def test_template_does_not_emit_cd(self, base_params):
+        """cd is handled by generate_sbatch_script, not the template."""
         result = render_template("swe_bench_agentic.sh.j2", **base_params)
-        assert "cd " in result
-        assert "/remote/project" in result
-
-    def test_no_working_dir_omits_cd(self, base_params):
-        base_params["working_dir"] = None
-        result = render_template("swe_bench_agentic.sh.j2", **base_params)
-        lines = result.strip().splitlines()
-        first_real = next(l for l in lines if l.strip())
-        assert not first_real.strip().startswith("cd ")
+        for line in result.strip().splitlines():
+            assert not line.strip().startswith("cd ")
 
     def test_set_x_present_set_e_absent(self, base_params):
         result = render_template("swe_bench_agentic.sh.j2", **base_params)
@@ -133,3 +129,69 @@ class TestSWEBenchAgenticTemplate:
     def test_env_vars_rendered(self, base_params):
         result = render_template("swe_bench_agentic.sh.j2", **base_params)
         assert "OH_SEND_REASONING_CONTENT" in result
+
+    # ------------------------------------------------------------------
+    # --max-attempts flag (run_infer_max_attempts)
+    # ------------------------------------------------------------------
+
+    def test_run_infer_max_attempts_default(self, base_params):
+        """--max-attempts flag should render with the default value of 5."""
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        assert "--max-attempts 5" in result
+
+    def test_run_infer_max_attempts_custom(self, base_params):
+        """--max-attempts flag should render with a custom value."""
+        base_params["run_infer_max_attempts"] = 10
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        assert "--max-attempts 10" in result
+
+    def test_run_infer_max_attempts_distinct_from_retry_loop(self, base_params):
+        """run_infer_max_attempts and max_attempts are independent."""
+        base_params["max_attempts"] = 3
+        base_params["run_infer_max_attempts"] = 7
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        assert "for attempt in {1..3}" in result
+        assert "--max-attempts 7" in result
+
+    # ------------------------------------------------------------------
+    # git safe.directory
+    # ------------------------------------------------------------------
+
+    def test_git_safe_dirs_empty(self, base_params):
+        """No git config lines when git_safe_dirs is empty."""
+        base_params["git_safe_dirs"] = []
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        assert "git config --global --add safe.directory" not in result
+
+    def test_git_safe_dirs_single(self, base_params):
+        """A single git safe.directory entry renders one config line."""
+        base_params["git_safe_dirs"] = ["/opt/repo"]
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        assert "git config --global --add safe.directory" in result
+        assert "/opt/repo" in result
+
+    def test_git_safe_dirs_multiple(self, base_params):
+        """Multiple git safe.directory entries render multiple config lines."""
+        base_params["git_safe_dirs"] = ["/opt/repo1", "/opt/repo2", "/home/user/project"]
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        for d in base_params["git_safe_dirs"]:
+            assert d in result
+        count = result.count("git config --global --add safe.directory")
+        assert count == 3
+
+    def test_git_safe_dirs_before_exports(self, base_params):
+        """git safe.directory lines must appear before export statements."""
+        base_params["git_safe_dirs"] = ["/opt/repo"]
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        git_line_pos = result.index("git config --global --add safe.directory")
+        export_pos = result.index("export DATASET=")
+        assert git_line_pos < export_pos
+
+    def test_git_safe_dirs_after_env_commands(self, base_params):
+        """git safe.directory lines must appear after env_commands."""
+        base_params["git_safe_dirs"] = ["/opt/repo"]
+        base_params["env_commands"] = ["source /opt/conda/bin/activate"]
+        result = render_template("swe_bench_agentic.sh.j2", **base_params)
+        env_cmd_pos = result.index("source /opt/conda/bin/activate")
+        git_line_pos = result.index("git config --global --add safe.directory")
+        assert env_cmd_pos < git_line_pos

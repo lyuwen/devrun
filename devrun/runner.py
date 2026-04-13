@@ -98,8 +98,7 @@ class TaskRunner:
             if dry_run:
                 logger.info("DRY RUN: Would submit task='%s', executor='%s', params=%s", cfg.task, cfg.executor, params)
             else:
-                job_id = self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env)
-                job_ids.append(job_id)
+                job_ids.extend(self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env))
 
         return job_ids
 
@@ -155,8 +154,7 @@ class TaskRunner:
         if not record:
             raise ValueError(f"Job {job_id} not found")
         params = record.params_dict
-        new_id = self._submit_single(record.task_name, record.executor, params)
-        return [new_id]
+        return self._submit_single(record.task_name, record.executor, params)
 
     def cancel(self, job_id: str) -> None:
         """Cancel a running job."""
@@ -221,37 +219,45 @@ class TaskRunner:
         logger.info("Sweep expanded to %d combinations", len(combos))
         return combos
 
-    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> str:
-        """Prepare and submit one job."""
-        # 1. Resolve task plugin
+    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> list[str]:
+        """Prepare and submit one or more jobs (multi-shard aware).
+
+        Returns a list of job IDs — one per :class:`TaskSpec` returned by
+        the task's ``prepare_many`` method.
+        """
+        # 1. Resolve task plugin and expand shards
         task_cls = get_task_class(task_name)
         task = task_cls()
-        task_spec: TaskSpec = task.prepare(params)
+        specs: list[TaskSpec] = task.prepare_many(params)
 
-        # 2. Propagate task-level python_env into metadata for executors to consume
-        if python_env is not None:
-            task_spec.metadata["python_env"] = python_env
+        job_ids: list[str] = []
+        for task_spec in specs:
+            # 2. Propagate task-level python_env into metadata for executors to consume
+            if python_env is not None:
+                task_spec.metadata["python_env"] = python_env
 
-        # 2. Record in DB
-        job_id = self._db.insert(task_name, executor_name, params)
+            # 3. Record in DB
+            job_id = self._db.insert(task_name, executor_name, params)
 
-        # 3. Resolve executor and submit
-        try:
-            executor = resolve_executor(executor_name, self.executor_configs)
-            self._db.update_status(job_id, JobStatus.SUBMITTED)
-            remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
-            log_path = task_spec.metadata.get("log_path")
-            self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
-            logger.info(
-                "Job %s submitted → executor=%s, remote_id=%s",
-                job_id, executor_name, remote_job_id,
-            )
-        except Exception as exc:
-            self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
-            logger.error("Job %s failed to submit: %s", job_id, exc)
-            raise
+            # 4. Resolve executor and submit
+            try:
+                executor = resolve_executor(executor_name, self.executor_configs)
+                self._db.update_status(job_id, JobStatus.SUBMITTED)
+                remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
+                log_path = task_spec.metadata.get("log_path")
+                self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
+                logger.info(
+                    "Job %s submitted → executor=%s, remote_id=%s",
+                    job_id, executor_name, remote_job_id,
+                )
+            except Exception as exc:
+                self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
+                logger.error("Job %s failed to submit: %s", job_id, exc)
+                raise
 
-        return job_id
+            job_ids.append(job_id)
+
+        return job_ids
 
     @staticmethod
     def _map_status(raw: str) -> JobStatus:

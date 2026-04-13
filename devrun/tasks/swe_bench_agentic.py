@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging as _logging
 from typing import Any
 
@@ -87,9 +88,10 @@ class SWEBenchAgenticTask(BaseTask):
         split = params.get("split", "test")
         max_iterations = params.get("max_iterations", 100)
         max_attempts = params.get("max_attempts", 5)
+        run_infer_max_attempts = params.get("run_infer_max_attempts", 5)
         select_dir = params.get("select_dir", "job_array")
         workspace = params.get("workspace", "docker")
-        task_id_format = params.get("task_id_format", "%05d")
+        task_id_format = params.get("task_id_format", "%03d")
         working_dir = params.get("working_dir")
 
         # Derive DS_DIR (shared utility ensures consistency with collect task)
@@ -99,12 +101,13 @@ class SWEBenchAgenticTask(BaseTask):
         flags = self._get_default_flags(params)
         env_commands = params.get("env_commands", [])
         env_vars = params.get("env", {})
+        git_safe_dirs = params.get("git_safe_dirs", [])
 
         # Render the bash command via Jinja2 template
         command = render_template(
             "swe_bench_agentic.sh.j2",
-            working_dir=working_dir,
             env_commands=env_commands,
+            git_safe_dirs=git_safe_dirs,
             dataset=dataset,
             model_name=model_name or "",
             base_url=params.get("base_url", ""),
@@ -117,6 +120,7 @@ class SWEBenchAgenticTask(BaseTask):
             task_id_format=task_id_format,
             output_dir=output_dir,
             max_attempts=max_attempts,
+            run_infer_max_attempts=run_infer_max_attempts,
             script=script,
             llm_config=llm_config,
             split=split,
@@ -160,3 +164,29 @@ class SWEBenchAgenticTask(BaseTask):
                 "set_e": False,  # retry loop requires set -x only, not set -e
             },
         )
+
+    def prepare_many(self, params: dict[str, Any]) -> list[TaskSpec]:
+        """Expand ``shards`` into multiple :class:`TaskSpec` objects.
+
+        When *params* contains a ``shards`` list, each entry should be a dict
+        with at least an ``array`` key and optionally an ``env`` dict whose
+        values are merged into the per-shard copy of *params*.  Each shard
+        produces one :class:`TaskSpec` via :meth:`prepare`.
+
+        Without ``shards``, falls back to the default single-spec behaviour.
+        """
+        shards = params.get("shards")
+        if not shards:
+            return [self.prepare(params)]
+
+        specs: list[TaskSpec] = []
+        for shard in shards:
+            merged = copy.deepcopy(params)
+            # Remove shards key from the copy to avoid recursion
+            merged.pop("shards", None)
+            if "array" in shard:
+                merged["array"] = shard["array"]
+            if "env" in shard:
+                merged.setdefault("env", {}).update(shard["env"])
+            specs.append(self.prepare(merged))
+        return specs
