@@ -124,7 +124,7 @@ class TestWorkflowSimulation:
 
         task = SWEBenchCollectTask()
         spec = task.prepare(swe_bench_config.stages[1].params)
-        assert "jq" in spec.command
+        assert "python3" in spec.command
         assert "predictions.jsonl" in spec.command
         assert "__mnt__data__SWE-bench_Verified-test" in spec.command
 

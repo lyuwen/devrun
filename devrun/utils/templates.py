@@ -1,6 +1,7 @@
 """Jinja2 template rendering utility for devrun task plugins."""
 from __future__ import annotations
 
+import json
 import shlex
 
 import jinja2
@@ -15,6 +16,7 @@ def _get_jinja_env() -> Environment:
         undefined=jinja2.StrictUndefined,
     )
     env.filters["shell_quote"] = shlex.quote
+    env.filters["tojson"] = json.dumps
     return env
 
 

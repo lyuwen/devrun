@@ -8,5 +8,7 @@ params:
   split: test
   model_name_or_path: ""   # Model identifier for prediction records
   predictions_path: predictions.jsonl
+  histories_path: collected_histories.jsonl
+  max_workers: 16          # Parallel workers for file discovery and processing
   # working_dir:           # Working directory for remote execution
   # array: "000-499"       # Optional: scope scan to array range
