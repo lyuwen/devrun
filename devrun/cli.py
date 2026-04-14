@@ -312,6 +312,50 @@ def cancel(
         raise typer.Exit(code=1)
 
 
+@app.command("doctor")
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Auto-fix deprecated config parameters"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show all checks, including passing"),
+) -> None:
+    """Check config health: validate schemas, detect deprecations, flag placeholders."""
+    from devrun.doctor import run_doctor, Severity
+
+    report = run_doctor(fix=fix, verbose=verbose)
+
+    if report.diagnostics or verbose:
+        table = Table(title="Doctor Report")
+        table.add_column("Severity", style="bold")
+        table.add_column("File")
+        table.add_column("Rule", style="dim")
+        table.add_column("Message")
+
+        severity_styles = {
+            Severity.ERROR: "red",
+            Severity.WARNING: "yellow",
+            Severity.INFO: "blue",
+        }
+
+        for d in report.diagnostics:
+            style = severity_styles.get(d.severity, "")
+            fixed = " [green](fixed)[/green]" if d.fix_applied else ""
+            table.add_row(
+                f"[{style}]{d.severity.value.upper()}[/{style}]",
+                d.file_path,
+                d.rule_id,
+                d.message + fixed,
+            )
+        console.print(table)
+
+    # Summary
+    console.print(
+        f"\n[bold]Summary:[/bold] {report.error_count} error(s), "
+        f"{report.warning_count} warning(s), {report.info_count} info"
+    )
+
+    if report.has_errors:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def sync(
     source: str = typer.Argument(..., help="Source path (local or remote:path)"),
