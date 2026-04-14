@@ -1,9 +1,15 @@
 """Unit tests for SWEBenchAgenticTask."""
 from __future__ import annotations
+import json
 import pytest
 import yaml
 from pathlib import Path
-from devrun.tasks.swe_bench_agentic import SWEBenchAgenticTask
+from devrun.tasks.swe_bench_agentic import (
+    SWEBenchAgenticTask,
+    _parse_array_range,
+    _compute_shard_ranges,
+    _format_llm_config,
+)
 from devrun.models import TaskConfig, TaskSpec
 
 
@@ -15,6 +21,90 @@ def _make_params(**kwargs):
     }
     base.update(kwargs)
     return base
+
+
+class TestHelpers:
+    """Tests for module-level helper functions."""
+
+    # --- _parse_array_range ---
+
+    def test_parse_array_range_3_digit(self):
+        assert _parse_array_range("000-499") == (0, 499, 3)
+
+    def test_parse_array_range_4_digit(self):
+        assert _parse_array_range("0000-0099") == (0, 99, 4)
+
+    def test_parse_array_range_nonzero_start(self):
+        assert _parse_array_range("050-149") == (50, 149, 3)
+
+    def test_parse_array_range_invalid_no_dash(self):
+        with pytest.raises(ValueError, match="Invalid array range"):
+            _parse_array_range("000499")
+
+    def test_parse_array_range_invalid_too_many_dashes(self):
+        with pytest.raises(ValueError, match="Invalid array range"):
+            _parse_array_range("0-1-2")
+
+    # --- _compute_shard_ranges ---
+
+    def test_compute_shard_ranges_even(self):
+        # 500 / 2 = 250 each
+        assert _compute_shard_ranges(0, 499, 2, 3) == ["000-249", "250-499"]
+
+    def test_compute_shard_ranges_3_way(self):
+        # 500 / 3 = 166 r 2 → first 2 get 167, last gets 166
+        result = _compute_shard_ranges(0, 499, 3, 3)
+        assert result == ["000-166", "167-333", "334-499"]
+
+    def test_compute_shard_ranges_uneven_7(self):
+        # 100 / 7 = 14 r 2 → first 2 get 15, remaining 5 get 14
+        result = _compute_shard_ranges(0, 99, 7, 3)
+        assert result == [
+            "000-014", "015-029", "030-043", "044-057",
+            "058-071", "072-085", "086-099",
+        ]
+
+    def test_compute_shard_ranges_single(self):
+        assert _compute_shard_ranges(0, 499, 1, 3) == ["000-499"]
+
+    def test_compute_shard_ranges_n_greater_than_total_raises(self):
+        with pytest.raises(ValueError, match="Cannot create"):
+            _compute_shard_ranges(0, 4, 10, 3)
+
+    def test_compute_shard_ranges_zero_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            _compute_shard_ranges(0, 99, 0, 3)
+
+    def test_compute_shard_ranges_4_digit_padding(self):
+        result = _compute_shard_ranges(0, 99, 2, 4)
+        assert result == ["0000-0049", "0050-0099"]
+
+    # --- _format_llm_config ---
+
+    def test_format_llm_config_replaces_placeholder(self):
+        config = {"base_url": "https://api.example.com/{JOB_ID}/v1"}
+        result = _format_llm_config(config, {"JOB_ID": "if-abc123"})
+        assert result == {"base_url": "https://api.example.com/if-abc123/v1"}
+
+    def test_format_llm_config_nested_dict(self):
+        config = {"outer": {"inner": "{JOB_ID}"}}
+        result = _format_llm_config(config, {"JOB_ID": "val"})
+        assert result == {"outer": {"inner": "val"}}
+
+    def test_format_llm_config_list_values(self):
+        config = {"urls": ["{JOB_ID}/a", "{JOB_ID}/b"]}
+        result = _format_llm_config(config, {"JOB_ID": "x"})
+        assert result == {"urls": ["x/a", "x/b"]}
+
+    def test_format_llm_config_non_string_untouched(self):
+        config = {"temp": 1.0, "top_p": 0.95, "log": True, "count": 42}
+        result = _format_llm_config(config, {"JOB_ID": "x"})
+        assert result == config
+
+    def test_format_llm_config_missing_placeholder_empty_string(self):
+        config = {"url": "https://{MISSING}/v1"}
+        result = _format_llm_config(config, {})
+        assert result == {"url": "https:///v1"}
 
 
 class TestSWEBenchAgenticTask:
@@ -202,88 +292,213 @@ class TestTaskIdFormatDefault:
         assert "%03d" not in spec.command
 
 
-class TestPrepareMany:
-    """Tests for SWEBenchAgenticTask.prepare_many (multi-shard support)."""
+class TestInstancesAutoSharding:
+    """Tests for prepare_many with instances-based auto-sharding."""
 
-    def test_prepare_many_no_shards_returns_single_spec(self):
-        """prepare_many without shards returns a single-element list."""
+    def test_instances_3_way_split(self):
+        """3 instances over '000-499' → 3 specs with correct array ranges."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(
+            array="000-499",
+            instances=[
+                {"JOB_ID": "if-abc123"},
+                {"JOB_ID": "if-def456"},
+                {"JOB_ID": "if-ghi789"},
+            ],
+        )
+        specs = task.prepare_many(params)
+        assert len(specs) == 3
+        extra0 = specs[0].resources.get("extra_sbatch", [])
+        extra1 = specs[1].resources.get("extra_sbatch", [])
+        extra2 = specs[2].resources.get("extra_sbatch", [])
+        assert any("000-166" in e for e in extra0)
+        assert any("167-333" in e for e in extra1)
+        assert any("334-499" in e for e in extra2)
+
+    def test_instances_2_way_split(self):
+        """2 instances over '000-499' → '000-249', '250-499'."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(
+            array="000-499",
+            instances=[
+                {"JOB_ID": "s1"},
+                {"JOB_ID": "s2"},
+            ],
+        )
+        specs = task.prepare_many(params)
+        assert len(specs) == 2
+        extra0 = specs[0].resources.get("extra_sbatch", [])
+        extra1 = specs[1].resources.get("extra_sbatch", [])
+        assert any("000-249" in e for e in extra0)
+        assert any("250-499" in e for e in extra1)
+
+    def test_instances_uneven(self):
+        """7 instances over '000-099' (100/7=14r2) → correct remainder distribution."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(
+            array="000-099",
+            instances=[{"JOB_ID": f"j{i}"} for i in range(7)],
+        )
+        specs = task.prepare_many(params)
+        assert len(specs) == 7
+        # First 2 get 15 items, remaining 5 get 14 items
+        expected_ranges = [
+            "000-014", "015-029", "030-043", "044-057",
+            "058-071", "072-085", "086-099",
+        ]
+        for spec, expected in zip(specs, expected_ranges):
+            extra = spec.resources.get("extra_sbatch", [])
+            assert any(expected in e for e in extra), f"Expected {expected} in {extra}"
+
+    def test_instances_env_merged(self):
+        """Each instance's JOB_ID ends up in the corresponding spec's env."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(
+            array="000-499",
+            instances=[
+                {"JOB_ID": "if-abc123"},
+                {"JOB_ID": "if-def456"},
+            ],
+        )
+        specs = task.prepare_many(params)
+        assert specs[0].env["JOB_ID"] == "if-abc123"
+        assert specs[1].env["JOB_ID"] == "if-def456"
+
+    def test_instances_pad_width(self):
+        """'0000-0099' preserves 4-digit padding in shard ranges."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(
+            array="0000-0099",
+            instances=[
+                {"JOB_ID": "s1"},
+                {"JOB_ID": "s2"},
+            ],
+        )
+        specs = task.prepare_many(params)
+        extra0 = specs[0].resources.get("extra_sbatch", [])
+        extra1 = specs[1].resources.get("extra_sbatch", [])
+        assert any("0000-0049" in e for e in extra0)
+        assert any("0050-0099" in e for e in extra1)
+
+    def test_instances_single(self):
+        """1 instance → single spec with full array range."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(
+            array="000-499",
+            instances=[{"JOB_ID": "only"}],
+        )
+        specs = task.prepare_many(params)
+        assert len(specs) == 1
+        extra = specs[0].resources.get("extra_sbatch", [])
+        assert any("000-499" in e for e in extra)
+
+    def test_no_instances_returns_single_spec(self):
+        """prepare_many without instances returns a single-element list."""
         task = SWEBenchAgenticTask()
         specs = task.prepare_many(_make_params())
         assert isinstance(specs, list)
         assert len(specs) == 1
         assert isinstance(specs[0], TaskSpec)
 
-    def test_prepare_many_with_shards_returns_n_specs(self):
-        """prepare_many with N shards returns N TaskSpecs."""
+    def test_instances_require_array(self):
+        """instances without array raises ValueError."""
         task = SWEBenchAgenticTask()
-        params = _make_params(
-            array=None,
-            shards=[
-                {"array": "000-249", "env": {"JOB_ID": "shard1"}},
-                {"array": "250-499", "env": {"JOB_ID": "shard2"}},
-            ],
-        )
-        specs = task.prepare_many(params)
-        assert len(specs) == 2
-        assert all(isinstance(s, TaskSpec) for s in specs)
+        params = _make_params(array=None, instances=[{"JOB_ID": "x"}])
+        with pytest.raises(ValueError, match="array is required"):
+            task.prepare_many(params)
 
-    def test_prepare_many_shard_array_ranges(self):
-        """Each shard gets the correct array range in extra_sbatch."""
-        task = SWEBenchAgenticTask()
-        params = _make_params(
-            array=None,
-            shards=[
-                {"array": "000-249"},
-                {"array": "250-499"},
-            ],
-        )
-        specs = task.prepare_many(params)
-        extra0 = specs[0].resources.get("extra_sbatch", [])
-        extra1 = specs[1].resources.get("extra_sbatch", [])
-        assert any("000-249" in e for e in extra0)
-        assert any("250-499" in e for e in extra1)
 
-    def test_prepare_many_shard_env_overrides(self):
-        """Each shard merges its env dict into the rendered command."""
-        task = SWEBenchAgenticTask()
-        params = _make_params(
-            array=None,
-            shards=[
-                {"array": "000-249", "env": {"JOB_ID": "shard1"}},
-                {"array": "250-499", "env": {"JOB_ID": "shard2"}},
-            ],
-        )
-        specs = task.prepare_many(params)
-        assert "shard1" in specs[0].command
-        assert "shard2" in specs[1].command
+class TestInlineLlmConfig:
+    """Tests for inline dict llm_config (heredoc mode)."""
 
-    def test_prepare_many_shards_do_not_mutate_original(self):
-        """prepare_many must deep-copy params — original should be unmodified."""
+    def test_inline_llm_config_heredoc(self):
+        """Dict llm_config → command contains __DEVRUN_LLM_EOF__ and JSON."""
         task = SWEBenchAgenticTask()
-        params = _make_params(
-            array=None,
-            shards=[
-                {"array": "000-249", "env": {"JOB_ID": "s1"}},
-                {"array": "250-499", "env": {"JOB_ID": "s2"}},
-            ],
-        )
-        original_shards = params["shards"].copy()
-        task.prepare_many(params)
-        assert params["shards"] == original_shards
+        spec = task.prepare(_make_params(
+            llm_config={"model": "openai/my-model", "api_key": "sk-xxx"},
+        ))
+        assert "__DEVRUN_LLM_EOF__" in spec.command
+        assert '"model"' in spec.command
+        assert '"openai/my-model"' in spec.command
 
-    def test_prepare_many_three_shards(self):
-        """Three shards produce three TaskSpecs."""
+    def test_inline_llm_config_format_job_id(self):
+        """{JOB_ID} in base_url resolved from env vars."""
         task = SWEBenchAgenticTask()
-        params = _make_params(
-            array=None,
-            shards=[
-                {"array": "000-166"},
-                {"array": "167-333"},
-                {"array": "334-499"},
-            ],
-        )
-        specs = task.prepare_many(params)
-        assert len(specs) == 3
+        spec = task.prepare(_make_params(
+            llm_config={
+                "model": "openai/my-model",
+                "base_url": "https://api.example.com/{JOB_ID}/v1",
+            },
+            env={"JOB_ID": "if-abc123"},
+        ))
+        assert "https://api.example.com/if-abc123/v1" in spec.command
+        # The unresolved placeholder should NOT appear
+        assert "{JOB_ID}" not in spec.command
+
+    def test_inline_llm_config_no_local_file(self, tmp_path):
+        """Dict mode does NOT create local .llm_config/ directory."""
+        task = SWEBenchAgenticTask()
+        task.prepare(_make_params(
+            llm_config={"model": "openai/my-model"},
+        ))
+        # No .llm_config directory should be created in cwd
+        assert not (tmp_path / ".llm_config").exists()
+
+    def test_inline_llm_config_cleanup(self):
+        """Command contains rm -f for temp file cleanup."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            llm_config={"model": "openai/my-model"},
+        ))
+        assert "rm -f" in spec.command
+
+    def test_file_llm_config_unchanged(self):
+        """String path → used directly in command, no heredoc."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(llm_config="/path/to/config.json"))
+        assert "__DEVRUN_LLM_EOF__" not in spec.command
+        assert "rm -f" not in spec.command
+        # Path appears in _LLM_CONFIG assignment (shell_quote may or may not add quotes)
+        assert "_LLM_CONFIG=" in spec.command
+        assert "/path/to/config.json" in spec.command
+
+    def test_anthropic_config_passthrough(self):
+        """litellm_extra_body dict preserved in serialized JSON."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            llm_config={
+                "model": "anthropic/claude-opus-4-6-thinking-hz",
+                "base_url": "http://10.200.95.16:30300",
+                "api_key": "sk-xxx",
+                "litellm_extra_body": {
+                    "thinking": {"type": "adaptive", "display": "summarized"},
+                    "output_config": {"effort": "max"},
+                },
+                "log_completions": True,
+            },
+        ))
+        # Parse the JSON from the heredoc to verify structure
+        assert '"litellm_extra_body"' in spec.command
+        assert '"thinking"' in spec.command
+        assert '"output_config"' in spec.command
+        # Verify the JSON is valid by extracting it
+        assert "__DEVRUN_LLM_EOF__" in spec.command
+        # Extract JSON between heredoc markers
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert parsed["litellm_extra_body"]["thinking"]["type"] == "adaptive"
+        assert parsed["litellm_extra_body"]["output_config"]["effort"] == "max"
+        assert parsed["log_completions"] is True
 
 
 class TestBaseTaskPrepareMany:
@@ -327,18 +542,16 @@ class TestConfigVariations:
         with open(path) as f:
             data = yaml.safe_load(f)
         assert "params" in data
-        assert "shards" in data["params"]
-        assert len(data["params"]["shards"]) == 2
+        assert "instances" in data["params"]
+        assert len(data["params"]["instances"]) == 2
 
-    def test_type2_shards_have_array_and_env(self, configs_dir):
-        """Each shard in type2.yaml should have array and env keys."""
+    def test_type2_instances_have_job_id(self, configs_dir):
+        """Each instance in type2.yaml should have a JOB_ID key."""
         path = configs_dir / "type2.yaml"
         with open(path) as f:
             data = yaml.safe_load(f)
-        for shard in data["params"]["shards"]:
-            assert "array" in shard
-            assert "env" in shard
-            assert "JOB_ID" in shard["env"]
+        for instance in data["params"]["instances"]:
+            assert "JOB_ID" in instance
 
     def test_type1_config_compatible_with_task_config(self, configs_dir):
         """type1.yaml merged with default.yaml should be loadable as TaskConfig."""
@@ -365,7 +578,7 @@ class TestConfigVariations:
         merged = {**base, "params": {**base.get("params", {}), **overlay.get("params", {})}}
         config = TaskConfig(**merged)
         assert config.task == "swe_bench_agentic"
-        assert "shards" in config.params
+        assert "instances" in config.params
 
     def test_default_config_parses(self, configs_dir):
         """default.yaml should parse and have run_infer_max_attempts and task_id_format."""

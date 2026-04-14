@@ -65,6 +65,7 @@ class TestSWEBenchAgenticTemplate:
             "extra_flags": ["--use-legacy-tools", "--bind-dev-sdk"],
             "env_vars": {"OH_SEND_REASONING_CONTENT": "yes"},
             "git_safe_dirs": [],
+            "llm_config_content": None,
         }
 
     def test_contains_retry_loop(self, base_params):

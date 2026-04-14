@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging as _logging
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from devrun.models import TaskSpec
@@ -13,6 +16,64 @@ from devrun.utils.swebench import derive_ds_dir
 from devrun.utils.templates import render_template
 
 _agentic_logger = _logging.getLogger("devrun.tasks.swe_bench_agentic")
+
+
+# --------------- Helpers ---------------
+
+
+def _parse_array_range(array_str: str) -> tuple[int, int, int]:
+    """Parse a zero-padded array range string like ``"000-499"``.
+
+    Returns ``(start, end, pad_width)`` where *pad_width* is the number of
+    digits in the original string (e.g. 3 for ``"000"``).
+    """
+    parts = array_str.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid array range: {array_str!r} (expected 'START-END')")
+    pad_width = len(parts[0])
+    return int(parts[0]), int(parts[1]), pad_width
+
+
+def _compute_shard_ranges(
+    start: int, end: int, n: int, pad_width: int
+) -> list[str]:
+    """Divide ``[start, end]`` into *n* contiguous chunks.
+
+    Remainder items are distributed one-per-chunk to the earlier chunks.
+    Returns a list of zero-padded range strings.
+    """
+    total = end - start + 1
+    if n <= 0:
+        raise ValueError("Number of shards must be positive")
+    if n > total:
+        raise ValueError(
+            f"Cannot create {n} shards from {total} items (array {start}-{end})"
+        )
+    chunk_size, remainder = divmod(total, n)
+    ranges: list[str] = []
+    offset = start
+    for i in range(n):
+        size = chunk_size + (1 if i < remainder else 0)
+        chunk_end = offset + size - 1
+        ranges.append(f"{offset:0{pad_width}d}-{chunk_end:0{pad_width}d}")
+        offset = chunk_end + 1
+    return ranges
+
+
+def _format_llm_config(config: Any, env_vars: dict[str, str]) -> Any:
+    """Recursively format string values in *config* using *env_vars*.
+
+    Uses :meth:`str.format_map` with a :class:`defaultdict` so that
+    unknown placeholders resolve to empty strings instead of raising.
+    """
+    fmt = defaultdict(str, env_vars)
+    if isinstance(config, dict):
+        return {k: _format_llm_config(v, env_vars) for k, v in config.items()}
+    if isinstance(config, list):
+        return [_format_llm_config(v, env_vars) for v in config]
+    if isinstance(config, str):
+        return config.format_map(fmt)
+    return config
 
 
 @register_task("swe_bench_agentic")
@@ -38,33 +99,29 @@ class SWEBenchAgenticTask(BaseTask):
 
         # --- resolve llm_config ---
         llm_config = params.get("llm_config")
+        llm_config_content: str | None = None  # None = file-path mode
+
         if isinstance(llm_config, dict):
-            import json
-            from pathlib import Path
-
-            config_name = model_name or run_name or "custom_llm"
-            llm_config_dir = Path(params.get("llm_config_dir", ".llm_config"))
-            llm_config_dir.mkdir(parents=True, exist_ok=True)
-
-            generated_path = llm_config_dir / f"{config_name}.json"
-            with open(generated_path, "w", encoding="utf-8") as f:
-                json.dump(llm_config, f, indent=2)
-
-            llm_config = str(generated_path)
-
-        if not llm_config:
+            # Inline dict: resolve format strings ({JOB_ID}, etc.) using
+            # env vars, then serialize to JSON.  The template will write
+            # this to a temp file on the remote machine.
+            env_vars = params.get("env", {})
+            resolved = _format_llm_config(llm_config, env_vars)
+            llm_config_content = json.dumps(resolved, indent=2)
+            llm_config = ""  # not used when content is set
+        elif not llm_config:
             if model_name:
                 llm_config_dir = params.get("llm_config_dir", ".llm_config")
                 llm_config = f"{llm_config_dir}/{model_name}.json"
             else:
                 raise ValueError("Either params.llm_config or params.model_name is required")
 
-        from pathlib import Path
-        if not Path(llm_config).is_file():
-            _agentic_logger.warning(
-                "llm_config file not found locally: %s — assuming it exists on the remote host.",
-                llm_config,
-            )
+        if llm_config_content is None and llm_config:
+            if not Path(llm_config).is_file():
+                _agentic_logger.warning(
+                    "llm_config file not found locally: %s — assuming it exists on the remote host.",
+                    llm_config,
+                )
 
         # --- resolve output_dir and run_name ---
         output_dir = params.get("output_dir")
@@ -123,6 +180,7 @@ class SWEBenchAgenticTask(BaseTask):
             run_infer_max_attempts=run_infer_max_attempts,
             script=script,
             llm_config=llm_config,
+            llm_config_content=llm_config_content,
             split=split,
             select_dir=select_dir,
             workspace=workspace,
@@ -166,27 +224,31 @@ class SWEBenchAgenticTask(BaseTask):
         )
 
     def prepare_many(self, params: dict[str, Any]) -> list[TaskSpec]:
-        """Expand ``shards`` into multiple :class:`TaskSpec` objects.
+        """Expand ``instances`` into multiple :class:`TaskSpec` objects.
 
-        When *params* contains a ``shards`` list, each entry should be a dict
-        with at least an ``array`` key and optionally an ``env`` dict whose
-        values are merged into the per-shard copy of *params*.  Each shard
-        produces one :class:`TaskSpec` via :meth:`prepare`.
+        When *params* contains an ``instances`` list, each entry is a dict
+        of environment variables (e.g. ``{JOB_ID: "if-abc123"}``).  The
+        top-level ``array`` range is divided evenly among the instances,
+        and each instance gets its own :class:`TaskSpec` via :meth:`prepare`.
 
-        Without ``shards``, falls back to the default single-spec behaviour.
+        Without ``instances``, falls back to the default single-spec behaviour.
         """
-        shards = params.get("shards")
-        if not shards:
+        instances = params.get("instances")
+        if not instances:
             return [self.prepare(params)]
 
+        array_str = params.get("array")
+        if not array_str:
+            raise ValueError("params.array is required when using instances")
+
+        start, end, pad_width = _parse_array_range(str(array_str))
+        ranges = _compute_shard_ranges(start, end, len(instances), pad_width)
+
         specs: list[TaskSpec] = []
-        for shard in shards:
+        for instance, array_range in zip(instances, ranges):
             merged = copy.deepcopy(params)
-            # Remove shards key from the copy to avoid recursion
-            merged.pop("shards", None)
-            if "array" in shard:
-                merged["array"] = shard["array"]
-            if "env" in shard:
-                merged.setdefault("env", {}).update(shard["env"])
+            merged.pop("instances", None)
+            merged["array"] = array_range
+            merged.setdefault("env", {}).update(instance)
             specs.append(self.prepare(merged))
         return specs

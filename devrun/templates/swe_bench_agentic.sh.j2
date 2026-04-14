@@ -4,9 +4,9 @@
    Required variables:
      dataset, model_name, base_url, api_key, temperature, top_p,
      run_name, max_iterations, ds_dir, task_id_format, output_dir,
-     max_attempts, run_infer_max_attempts, script, llm_config, split,
-     select_dir, workspace, extra_flags, env_commands, env_vars,
-     git_safe_dirs
+     max_attempts, run_infer_max_attempts, script, llm_config,
+     llm_config_content, split, select_dir, workspace, extra_flags,
+     env_commands, env_vars, git_safe_dirs
 
 #}
 {% for cmd in env_commands %}
@@ -37,6 +37,16 @@ OUTPUT_PATH="{{ output_dir }}/${num}"
 mkdir -p "${OUTPUT_PATH}"
 echo "Processing ${num} -> ${OUTPUT_PATH}"
 
+{% if llm_config_content %}
+_LLM_CONFIG=$(mktemp /tmp/devrun_llm_config_XXXXXX.json)
+trap 'rm -f "${_LLM_CONFIG}"' EXIT
+cat > "${_LLM_CONFIG}" << '__DEVRUN_LLM_EOF__'
+{{ llm_config_content }}
+__DEVRUN_LLM_EOF__
+{% else %}
+_LLM_CONFIG={{ llm_config | shell_quote }}
+{% endif %}
+
 for attempt in {1..{{ max_attempts }}}; do
     echo "Attempt ${attempt} of {{ max_attempts }}..."
 
@@ -56,7 +66,7 @@ for attempt in {1..{{ max_attempts }}}; do
         mv "${OUTPUT_PATH}/${DS_DIR}" "${OUTPUT_PATH}/old/${DS_DIR}-${TS}"
     fi
 
-    python {{ script | shell_quote }} {{ llm_config | shell_quote }} \
+    python {{ script | shell_quote }} "${_LLM_CONFIG}" \
         --dataset ${DATASET} \
         --split {{ split }} \
         --max-iterations {{ max_iterations }} \

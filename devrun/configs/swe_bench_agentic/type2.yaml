@@ -1,5 +1,5 @@
 # configs/swe_bench_agentic/type2.yaml
-# Type 2: Multi-shard — splits work across multiple Slurm submissions,
+# Type 2: Multi-instance — auto-shards the array range across instances,
 # each pointing at a different backend (via JOB_ID env var).
 # Extends default.yaml; only override what differs.
 
@@ -10,16 +10,12 @@ params:
   dataset: "/path/to/SWE-bench_Verified"
   max_iterations: 200
 
-  # Do not set top-level array — shards define per-submission ranges.
-  array: null
+  # Top-level array is split evenly among instances.
+  array: "000-499"
   concurrency_limit: 16
   oversubscribe: true
   partition: "core32"
 
-  shards:
-    - array: "000-249"
-      env:
-        JOB_ID: "if-placeholder-shard1"
-    - array: "250-499"
-      env:
-        JOB_ID: "if-placeholder-shard2"
+  instances:
+    - JOB_ID: "if-placeholder-instance1"
+    - JOB_ID: "if-placeholder-instance2"
