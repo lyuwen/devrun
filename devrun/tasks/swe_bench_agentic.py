@@ -232,8 +232,16 @@ class SWEBenchAgenticTask(BaseTask):
         and each instance gets its own :class:`TaskSpec` via :meth:`prepare`.
 
         Without ``instances``, falls back to the default single-spec behaviour.
+
+        Shorthand: ``job_ids`` (comma-separated string) is expanded into
+        ``instances`` automatically, e.g. ``"id1,id2,id3"`` becomes
+        ``[{JOB_ID: "id1"}, {JOB_ID: "id2"}, {JOB_ID: "id3"}]``.
         """
         instances = params.get("instances")
+        if not instances:
+            job_ids = params.get("job_ids")
+            if job_ids:
+                instances = [{"JOB_ID": jid.strip()} for jid in str(job_ids).split(",")]
         if not instances:
             return [self.prepare(params)]
 

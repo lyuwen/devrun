@@ -35,6 +35,9 @@ params:
   # instances:
   #   - JOB_ID: "if-abc123"
   #   - JOB_ID: "if-def456"
+  #
+  # Shorthand: job_ids as a comma-separated string (expands to instances):
+  # job_ids: "if-abc123,if-def456,if-ghi789"
 
   dataset: ""                 # Provide absolute path to dataset
   split: test

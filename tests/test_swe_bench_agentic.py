@@ -407,6 +407,24 @@ class TestInstancesAutoSharding:
         with pytest.raises(ValueError, match="array is required"):
             task.prepare_many(params)
 
+    def test_job_ids_shorthand(self):
+        """Comma-separated job_ids string expands into instances."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(array="000-499", job_ids="if-abc,if-def,if-ghi")
+        specs = task.prepare_many(params)
+        assert len(specs) == 3
+        assert specs[0].env["JOB_ID"] == "if-abc"
+        assert specs[1].env["JOB_ID"] == "if-def"
+        assert specs[2].env["JOB_ID"] == "if-ghi"
+
+    def test_job_ids_whitespace_trimmed(self):
+        """Whitespace around comma-separated job_ids is trimmed."""
+        task = SWEBenchAgenticTask()
+        params = _make_params(array="000-099", job_ids="id1 , id2")
+        specs = task.prepare_many(params)
+        assert specs[0].env["JOB_ID"] == "id1"
+        assert specs[1].env["JOB_ID"] == "id2"
+
 
 class TestInlineLlmConfig:
     """Tests for inline dict llm_config (heredoc mode)."""
