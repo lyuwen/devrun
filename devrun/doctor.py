@@ -191,8 +191,21 @@ def _discover_config_files() -> tuple[list[Path], list[Path]]:
 
 
 def _validate_task_config(file_path: Path, raw: dict) -> list[Diagnostic]:
-    """Parse with TaskConfig; return ERROR diagnostics on validation failure."""
+    """Parse with TaskConfig; return ERROR diagnostics on validation failure.
+
+    Configs inside task subdirectories (e.g. ``swe_bench_agentic/default.yaml``)
+    may be partial overlays that get merged via OmegaConf.  If the required
+    ``task`` and ``executor`` fields are absent we treat the file as a partial
+    config and skip structural validation (deprecation / placeholder checks
+    still run).
+    """
     diagnostics: list[Diagnostic] = []
+
+    # Detect partial overlay configs — they lack the required top-level keys
+    is_partial = "task" not in raw or "executor" not in raw
+    if is_partial:
+        return diagnostics
+
     try:
         TaskConfig(**raw)
     except ValidationError as exc:
@@ -495,7 +508,9 @@ def run_doctor(*, fix: bool = False, verbose: bool = False) -> DoctorReport:
             continue
 
         report.diagnostics.extend(_validate_task_config(task_path, raw))
-        report.diagnostics.extend(_check_cross_references(task_path, raw, executor_names))
+        # Cross-reference checks only make sense for complete configs
+        if "task" in raw and "executor" in raw:
+            report.diagnostics.extend(_check_cross_references(task_path, raw, executor_names))
         report.diagnostics.extend(
             _check_deprecations(task_path, raw, ConfigScope.TASK)
         )

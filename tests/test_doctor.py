@@ -212,12 +212,18 @@ class TestValidateTaskConfig:
         assert len(diags) == 0
 
     def test_invalid_config_returns_error(self):
-        # Missing required 'task' and 'executor' fields
-        raw = {"params": {"model": "gpt"}}
+        # Has required top-level keys but with invalid types
+        raw = {"task": 123, "executor": 456}
         diags = _validate_task_config(Path("test.yaml"), raw)
         assert len(diags) == 1
         assert diags[0].severity == Severity.ERROR
         assert diags[0].rule_id == "SCHEMA"
+
+    def test_partial_config_skips_validation(self):
+        """Configs missing task/executor are partial overlays — no error."""
+        raw = {"params": {"model": "gpt"}}
+        diags = _validate_task_config(Path("test.yaml"), raw)
+        assert len(diags) == 0
 
     def test_minimal_valid_config(self):
         raw = {"task": "eval", "executor": "local"}
