@@ -236,12 +236,13 @@ class SWEBenchAgenticTask(BaseTask):
         Shorthand: ``job_ids`` (comma-separated string) is expanded into
         ``instances`` automatically, e.g. ``"id1,id2,id3"`` becomes
         ``[{JOB_ID: "id1"}, {JOB_ID: "id2"}, {JOB_ID: "id3"}]``.
+        ``job_ids`` takes precedence over ``instances`` when both are present.
         """
-        instances = params.get("instances")
-        if not instances:
-            job_ids = params.get("job_ids")
-            if job_ids:
-                instances = [{"JOB_ID": jid.strip()} for jid in str(job_ids).split(",")]
+        job_ids = params.get("job_ids")
+        if job_ids:
+            instances = [{"JOB_ID": jid.strip()} for jid in str(job_ids).split(",")]
+        else:
+            instances = params.get("instances")
         if not instances:
             return [self.prepare(params)]
 

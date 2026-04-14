@@ -101,15 +101,19 @@ class TaskRunner:
                 specs: list[TaskSpec] = task.prepare_many(params)
                 for i, spec in enumerate(specs):
                     label = f"spec {i + 1}/{len(specs)}" if len(specs) > 1 else "spec"
-                    logger.info(
-                        "DRY RUN [%s]: task='%s', executor='%s', working_dir=%s",
-                        label, cfg.task, cfg.executor, spec.working_dir,
+                    header = (
+                        f"# DRY RUN [{label}]: task={cfg.task}, executor={cfg.executor}"
                     )
+                    if spec.working_dir:
+                        header += f", working_dir={spec.working_dir}"
+                    lines = [header]
                     if spec.resources:
-                        logger.info("  resources: %s", spec.resources)
+                        lines.append(f"# resources: {spec.resources}")
                     if spec.env:
-                        logger.info("  env: %s", spec.env)
-                    logger.info("  command:\n%s", spec.command)
+                        lines.append(f"# env: {spec.env}")
+                    lines.append("")
+                    lines.append(spec.command)
+                    print("\n".join(lines))
             else:
                 job_ids.extend(self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env))
 
