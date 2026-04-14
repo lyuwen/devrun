@@ -96,7 +96,20 @@ class TaskRunner:
 
         for params in param_combos:
             if dry_run:
-                logger.info("DRY RUN: Would submit task='%s', executor='%s', params=%s", cfg.task, cfg.executor, params)
+                task_cls = get_task_class(cfg.task)
+                task = task_cls()
+                specs: list[TaskSpec] = task.prepare_many(params)
+                for i, spec in enumerate(specs):
+                    label = f"spec {i + 1}/{len(specs)}" if len(specs) > 1 else "spec"
+                    logger.info(
+                        "DRY RUN [%s]: task='%s', executor='%s', working_dir=%s",
+                        label, cfg.task, cfg.executor, spec.working_dir,
+                    )
+                    if spec.resources:
+                        logger.info("  resources: %s", spec.resources)
+                    if spec.env:
+                        logger.info("  env: %s", spec.env)
+                    logger.info("  command:\n%s", spec.command)
             else:
                 job_ids.extend(self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env))
 
