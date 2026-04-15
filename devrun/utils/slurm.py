@@ -74,7 +74,7 @@ def generate_sbatch_script(
 
     # Change to working directory if specified
     if working_dir:
-        lines.append(f"cd {working_dir}")
+        lines.append(f"cd {shlex.quote(working_dir)}")
         lines.append("")
 
     lines.append("set -ex" if set_e else "set -x")

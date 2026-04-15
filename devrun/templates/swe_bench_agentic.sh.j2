@@ -33,7 +33,7 @@ DS_DIR={{ ds_dir | shell_quote }}
 set -x
 
 num=$(printf "{{ task_id_format }}\n" ${SLURM_ARRAY_TASK_ID:-0})
-OUTPUT_PATH="{{ output_dir }}/${num}"
+OUTPUT_PATH={{ output_dir | shell_quote }}/${num}
 mkdir -p "${OUTPUT_PATH}"
 echo "Processing ${num} -> ${OUTPUT_PATH}"
 
@@ -68,11 +68,11 @@ for attempt in {1..{{ max_attempts }}}; do
 
     python {{ script | shell_quote }} "${_LLM_CONFIG}" \
         --dataset ${DATASET} \
-        --split {{ split }} \
+        --split {{ split | shell_quote }} \
         --max-iterations {{ max_iterations }} \
         --max-attempts {{ run_infer_max_attempts }} \
-        --select {{ select_dir }}/${num}.txt \
-        --workspace {{ workspace }} \
+        --select {{ select_dir | shell_quote }}/${num}.txt \
+        --workspace {{ workspace | shell_quote }} \
         --output-dir "${OUTPUT_PATH}"{% for flag in extra_flags %} \
         {{ flag }}{% endfor %}
 

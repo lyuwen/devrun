@@ -96,6 +96,7 @@ class WorkflowRunner:
                             job_id = self._submit_stage(stage.name, stage)
                             state["status"] = "submitted"
                             state["job_id"] = job_id
+                            state["executor"] = stage.executor
                             logger.info(
                                 "Stage %s submitted: job_id=%s", stage.name, job_id
                             )
@@ -225,7 +226,7 @@ class WorkflowRunner:
         return self._db.list_workflows(limit=limit)
 
     def cancel(self, workflow_id: str) -> None:
-        """Cancel all active stages of a workflow."""
+        """Cancel all active stages of a workflow, including remote executor jobs."""
         record = self._db.get_workflow(workflow_id)
         if not record:
             raise ValueError(f"Workflow {workflow_id} not found")
@@ -233,6 +234,21 @@ class WorkflowRunner:
         for name, state in stages_state.items():
             if state["status"] in ("submitted", "running") and state.get("job_id"):
                 logger.info("Cancelling stage %s (job %s)", name, state["job_id"])
+                # Cancel the actual remote job if executor info is available
+                executor_name = state.get("executor")
+                if executor_name:
+                    try:
+                        executor = resolve_executor(
+                            executor_name, executors_path=self._executors_path
+                        )
+                        executor.cancel(state["job_id"])
+                    except Exception:
+                        logger.warning(
+                            "Failed to cancel remote job %s for stage %s",
+                            state["job_id"],
+                            name,
+                            exc_info=True,
+                        )
                 state["status"] = "cancelled"
         self._db.update_workflow(
             workflow_id,
