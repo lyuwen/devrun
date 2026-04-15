@@ -4,7 +4,7 @@ executor: local
 
 params:
   output_dir: ""           # Root output directory from inference (e.g., logs/run1)
-  dataset: ""              # Dataset path (used to derive DS_DIR)
+  dataset: ""              # Dataset path (optional; auto-discovers DS_DIR from output when empty)
   split: test
   model_name_or_path: ""   # Model identifier for prediction records
   predictions_path: predictions.jsonl

@@ -31,8 +31,6 @@ class SWEBenchCollectTask(BaseTask):
 
         if not output_dir:
             raise ValueError("params.output_dir is required")
-        if not dataset:
-            raise ValueError("params.dataset is required")
         if not model_name_or_path:
             raise ValueError("params.model_name_or_path is required")
 
@@ -42,7 +40,7 @@ class SWEBenchCollectTask(BaseTask):
         working_dir = params.get("working_dir")
         max_workers = params.get("max_workers", 16)
 
-        ds_dir = derive_ds_dir(dataset, split)
+        ds_dir = derive_ds_dir(dataset, split) if dataset else ""
 
         # Render the Python collector script via Jinja2
         collector_script = render_template(

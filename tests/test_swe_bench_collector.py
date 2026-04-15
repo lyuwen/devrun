@@ -559,7 +559,243 @@ class TestEmptyDirectory:
 
 
 # ============================================================================
-# 7. Template rendering integrity
+# 7. Auto-discovery: auto_discover_suffix()
+# ============================================================================
+
+
+def _auto_collector(tmp_path):
+    """Load a collector module in auto-discover mode (ds_dir="")."""
+    pred_path = str(tmp_path / "predictions.jsonl")
+    hist_path = str(tmp_path / "collected_histories.jsonl")
+    src = _render_collector(
+        output_dir=str(tmp_path / "outputs"),
+        ds_dir="",
+        predictions_path=pred_path,
+        histories_path=hist_path,
+    )
+    return _load_collector(src)
+
+
+class TestAutoDiscoverSuffix:
+    def test_discovers_suffix_from_shard_000(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        _build_instance_dir(
+            output_root, "000", DS_DIR, "openai", "inst_1",
+            output_content=_make_output_jsonl("id1", "patch"),
+        )
+        mod = _auto_collector(tmp_path)
+        suffix = mod.auto_discover_suffix(str(output_root))
+        assert suffix is not None
+        assert suffix.endswith("output.jsonl")
+        assert DS_DIR in suffix
+        assert "openai" in suffix
+
+    def test_fallback_when_shard_000_missing(self, tmp_path):
+        """When shard 000 doesn't exist, fallback glob finds other shards."""
+        output_root = tmp_path / "outputs"
+        _build_instance_dir(
+            output_root, "005", DS_DIR, "anthropic", "inst_1",
+            output_content=_make_output_jsonl("id1", "patch"),
+        )
+        mod = _auto_collector(tmp_path)
+        suffix = mod.auto_discover_suffix(str(output_root))
+        assert suffix is not None
+        assert DS_DIR in suffix
+        assert "anthropic" in suffix
+
+    def test_returns_none_for_empty_dir(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        output_root.mkdir()
+        mod = _auto_collector(tmp_path)
+        assert mod.auto_discover_suffix(str(output_root)) is None
+
+    def test_returns_none_for_no_output_files(self, tmp_path):
+        """Shard dirs exist but no output.jsonl at the expected depth."""
+        output_root = tmp_path / "outputs"
+        (output_root / "000" / DS_DIR / "openai").mkdir(parents=True)
+        mod = _auto_collector(tmp_path)
+        assert mod.auto_discover_suffix(str(output_root)) is None
+
+    def test_deep_ds_dir_name(self, tmp_path):
+        """Long DS_DIR names with many underscores should be handled correctly."""
+        output_root = tmp_path / "outputs"
+        deep_ds = "__mnt__huawei__users__lfu__datasets__SWE-bench_Verified-test"
+        _build_instance_dir(
+            output_root, "000", deep_ds, "openai", "inst_1",
+            output_content=_make_output_jsonl("id1", "patch"),
+        )
+        mod = _auto_collector(tmp_path)
+        suffix = mod.auto_discover_suffix(str(output_root))
+        assert suffix is not None
+        assert deep_ds in suffix
+
+
+# ============================================================================
+# 8. Auto-discovery: discover_candidates_auto()
+# ============================================================================
+
+
+class TestDiscoverCandidatesAuto:
+    def test_finds_valid_files_across_shards(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        suffix_dir = os.path.join(DS_DIR, "openai", "model")
+        for shard in ("000", "001", "002"):
+            _build_instance_dir(
+                output_root, shard, DS_DIR, "openai", "model",
+                output_content=_make_output_jsonl(f"id_{shard}", "patch"),
+            )
+        mod = _auto_collector(tmp_path)
+        suffix = os.path.join(suffix_dir, "output.jsonl")
+        valid = mod.discover_candidates_auto(str(output_root), suffix)
+        assert len(valid) == 3
+        for dir_path, output_path in valid:
+            assert output_path.endswith("output.jsonl")
+            assert os.path.isdir(dir_path)
+
+    def test_skips_shards_missing_file(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        _build_instance_dir(
+            output_root, "000", DS_DIR, "openai", "model",
+            output_content=_make_output_jsonl("id0", "patch"),
+        )
+        # shard 001 exists but has no output.jsonl
+        (output_root / "001" / DS_DIR / "openai" / "model").mkdir(parents=True)
+        mod = _auto_collector(tmp_path)
+        suffix = os.path.join(DS_DIR, "openai", "model", "output.jsonl")
+        valid = mod.discover_candidates_auto(str(output_root), suffix)
+        assert len(valid) == 1
+
+    def test_skips_empty_files(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        _build_instance_dir(
+            output_root, "000", DS_DIR, "openai", "model",
+            output_content="",  # empty file
+        )
+        mod = _auto_collector(tmp_path)
+        suffix = os.path.join(DS_DIR, "openai", "model", "output.jsonl")
+        valid = mod.discover_candidates_auto(str(output_root), suffix)
+        assert len(valid) == 0
+
+    def test_empty_output_dir(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        output_root.mkdir()
+        mod = _auto_collector(tmp_path)
+        valid = mod.discover_candidates_auto(str(output_root), "any/suffix")
+        assert valid == []
+
+    def test_nonexistent_output_dir(self, tmp_path):
+        mod = _auto_collector(tmp_path)
+        valid = mod.discover_candidates_auto(str(tmp_path / "ghost"), "any/suffix")
+        assert valid == []
+
+
+# ============================================================================
+# 9. End-to-end: auto-discover mode
+# ============================================================================
+
+
+class TestEndToEndAutoDiscover:
+    """Run the collector script in auto-discover mode (ds_dir="") as a subprocess."""
+
+    def _run_auto_collector(self, tmp_path: Path, output_root: Path) -> subprocess.CompletedProcess:
+        pred_path = str(tmp_path / "predictions.jsonl")
+        hist_path = str(tmp_path / "collected_histories.jsonl")
+        src = _render_collector(
+            output_dir=str(output_root),
+            ds_dir="",
+            predictions_path=pred_path,
+            histories_path=hist_path,
+        )
+        script = tmp_path / "collector.py"
+        script.write_text(src, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(script)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_basic_collection(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        output_root.mkdir()
+        # In real SWE-bench, all shards share the same ds_dir/provider/model
+        # path; instance data varies inside output.jsonl, not in dir names.
+        _build_instance_dir(
+            output_root, "000", DS_DIR, "openai", "gpt-4o",
+            output_content=_make_output_jsonl("django__django-1", "patch1"),
+            history_files={"a.history.json": {"steps": [1]}},
+        )
+        _build_instance_dir(
+            output_root, "001", DS_DIR, "openai", "gpt-4o",
+            output_content=_make_output_jsonl("flask__flask-2", "patch2"),
+        )
+
+        result = self._run_auto_collector(tmp_path, output_root)
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+
+        pred_path = tmp_path / "predictions.jsonl"
+        assert pred_path.exists()
+        preds = [json.loads(line) for line in pred_path.read_text().strip().splitlines()]
+        assert len(preds) == 2
+        ids = sorted(p["instance_id"] for p in preds)
+        assert ids == ["django__django-1", "flask__flask-2"]
+
+        hist_path = tmp_path / "collected_histories.jsonl"
+        assert hist_path.exists()
+        histories = [json.loads(line) for line in hist_path.read_text().strip().splitlines()]
+        assert len(histories) == 1
+
+    def test_empty_dir(self, tmp_path):
+        output_root = tmp_path / "outputs"
+        output_root.mkdir()
+
+        result = self._run_auto_collector(tmp_path, output_root)
+        assert result.returncode == 0
+        assert "Collected 0 predictions" in result.stdout
+        assert Path(tmp_path / "predictions.jsonl").read_text() == ""
+
+    def test_mixed_shards(self, tmp_path):
+        """Some shards complete, some missing output.jsonl."""
+        output_root = tmp_path / "outputs"
+        output_root.mkdir()
+        _build_instance_dir(
+            output_root, "000", DS_DIR, "openai", "gpt-4o",
+            output_content=_make_output_jsonl("id_a", "patch_a"),
+        )
+        # shard 001 has directory structure but no output.jsonl
+        (output_root / "001" / DS_DIR / "openai" / "gpt-4o").mkdir(parents=True)
+        _build_instance_dir(
+            output_root, "002", DS_DIR, "openai", "gpt-4o",
+            output_content=_make_output_jsonl("id_c", "patch_c"),
+        )
+
+        result = self._run_auto_collector(tmp_path, output_root)
+        assert result.returncode == 0
+
+        preds = [
+            json.loads(l) for l in
+            (tmp_path / "predictions.jsonl").read_text().strip().splitlines()
+        ]
+        assert len(preds) == 2
+        ids = sorted(p["instance_id"] for p in preds)
+        assert ids == ["id_a", "id_c"]
+
+    def test_logs_discovered_suffix(self, tmp_path):
+        """Auto-discover mode should log the discovered suffix to stderr."""
+        output_root = tmp_path / "outputs"
+        output_root.mkdir()
+        _build_instance_dir(
+            output_root, "000", DS_DIR, "openai", "inst",
+            output_content=_make_output_jsonl("id", "patch"),
+        )
+
+        result = self._run_auto_collector(tmp_path, output_root)
+        assert result.returncode == 0
+        assert "Discovered suffix:" in result.stderr
+        assert DS_DIR in result.stderr
+
+# ============================================================================
+# 10. Template rendering integrity
 # ============================================================================
 
 

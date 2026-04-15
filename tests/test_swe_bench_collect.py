@@ -25,10 +25,22 @@ class TestSWEBenchCollectTask:
         with pytest.raises(ValueError, match="output_dir"):
             task.prepare({"dataset": "/fake", "model_name_or_path": "m"})
 
-    def test_prepare_requires_dataset(self):
+    def test_prepare_without_dataset_triggers_auto_discover(self):
+        """Omitting dataset should produce a valid TaskSpec with empty DS_DIR."""
         task = SWEBenchCollectTask()
-        with pytest.raises(ValueError, match="dataset"):
-            task.prepare({"output_dir": "logs/run1", "model_name_or_path": "m"})
+        spec = task.prepare({"output_dir": "logs/run1", "model_name_or_path": "m"})
+        assert 'DS_DIR = ""' in spec.command
+
+    def test_prepare_with_dataset_has_ds_dir(self):
+        """Providing dataset should inject the derived DS_DIR."""
+        task = SWEBenchCollectTask()
+        spec = task.prepare(_make_params())
+        assert "__mnt__data__SWE-bench_Verified-test" in spec.command
+
+    def test_prepare_without_dataset_still_requires_model_name_or_path(self):
+        task = SWEBenchCollectTask()
+        with pytest.raises(ValueError, match="model_name_or_path"):
+            task.prepare({"output_dir": "logs/run1"})
 
     def test_prepare_requires_model_name_or_path(self):
         task = SWEBenchCollectTask()
