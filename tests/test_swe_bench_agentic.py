@@ -782,7 +782,7 @@ class TestShorthandLlmConfig:
         assert parsed["model"] == "gemini/gemini-2.5-pro"
 
     def test_shorthand_numeric_temperature_no_crash(self):
-        """Float temperature=0.7 doesn't crash shell_quote; appears in JSON and shell var."""
+        """Float temperature=0.7 doesn't crash prepare() and appears in JSON."""
         task = SWEBenchAgenticTask()
         spec = task.prepare(self._shorthand_params(
             model_name="openai/my-model", temperature=0.7,
@@ -790,8 +790,6 @@ class TestShorthandLlmConfig:
         # Heredoc JSON preserves the float
         parsed = _extract_heredoc_json(spec.command)
         assert parsed["temperature"] == 0.7
-        # Template exports TEMPERATURE as a string shell var
-        assert "TEMPERATURE=" in spec.command
 
 
 class TestBaseTaskPrepareMany:
