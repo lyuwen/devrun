@@ -546,6 +546,78 @@ def workflow_cancel(
 
 
 # ---------------------------------------------------------------------------
+# Keys subcommands
+# ---------------------------------------------------------------------------
+
+
+keys_app = typer.Typer(name="keys", help="Manage stored secrets.")
+app.add_typer(keys_app, name="keys")
+
+
+@keys_app.command("set")
+def keys_set(
+    name: str = typer.Argument(..., help="Key name"),
+    value: str = typer.Argument(..., help="Secret value to store"),
+) -> None:
+    """Store a secret value under a given name."""
+    from devrun.keystore import KeyStore
+
+    try:
+        KeyStore().set(name, value)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Key '{name}' stored.[/green]")
+
+
+@keys_app.command("get")
+def keys_get(
+    name: str = typer.Argument(..., help="Key name"),
+) -> None:
+    """Print the plain-text value for a stored key."""
+    from devrun.keystore import KeyStore
+
+    try:
+        value = KeyStore().get(name)
+    except KeyError:
+        console.print(f"[red]Key '{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(value)
+
+
+@keys_app.command("list")
+def keys_list() -> None:
+    """List all stored key names."""
+    from devrun.keystore import KeyStore
+
+    names = KeyStore().list_keys()
+    if not names:
+        console.print("[dim]No keys stored.[/dim]")
+        return
+
+    table = Table(title="Stored Keys")
+    table.add_column("Name", style="cyan")
+    for n in names:
+        table.add_row(n)
+    console.print(table)
+
+
+@keys_app.command("delete")
+def keys_delete(
+    name: str = typer.Argument(..., help="Key name"),
+) -> None:
+    """Delete a stored key."""
+    from devrun.keystore import KeyStore
+
+    try:
+        KeyStore().delete(name)
+    except KeyError:
+        console.print(f"[red]Key '{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Key '{name}' deleted.[/green]")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
