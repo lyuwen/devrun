@@ -9,6 +9,8 @@
      env_commands, env_vars, git_safe_dirs
 
 #}
+{# env_commands are rendered raw intentionally — they are arbitrary shell
+   preamble lines provided by the user (e.g. conda activate, module load). #}
 {% for cmd in env_commands %}
 {{ cmd }}
 {% endfor %}

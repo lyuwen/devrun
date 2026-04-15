@@ -361,7 +361,17 @@ def _apply_fixes(
     When *entry_names* is provided (e.g. for ``executors.yaml``), the rules
     are applied within each named sub-dict rather than at the document root.
     """
-    from ruamel.yaml import YAML
+    try:
+        from ruamel.yaml import YAML
+    except ImportError:
+        return [
+            Diagnostic(
+                severity="error",
+                file_path=str(file_path),
+                rule_id="missing-ruamel",
+                message="ruamel.yaml is required for auto-fix: pip install ruamel.yaml",
+            )
+        ]
 
     diagnostics: list[Diagnostic] = []
 
