@@ -4,7 +4,7 @@ executor: local
 
 params:
   # Path to the SWE-bench dataset (e.g., /path/to/dataset/SWE-bench_Verified)
-  dataset_name: <path_to_dataset>
+  # dataset_name:              # Set in user/project config
   split: test
   max_workers: 8
 
@@ -14,7 +14,7 @@ params:
   predictions_path: predictions.jsonl
 
   # Working directory where the predictions.jsonl file is located
-  working_dir: <path_to_working_directory>
+  # working_dir:               # Set in user/project config
 
   # Docker namespace for SWE-bench images (optional)
   # namespace: <docker_registry_namespace>

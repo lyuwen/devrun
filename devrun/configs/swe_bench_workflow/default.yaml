@@ -25,7 +25,7 @@ stages:
       array: "000-499"
       concurrency_limit: 10
       working_dir: "${params.working_dir}"
-      partition: agent
+      # partition: "agent"        # Set in user/project config
       cpus_per_task: 4
       mem: 32G
       walltime: "24:00:00"

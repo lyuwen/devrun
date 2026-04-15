@@ -21,4 +21,4 @@ params:
   cpus_per_task: 32
   max_workers: 32
   walltime: "24:00:00"
-  partition: debug
+  # partition: "debug"          # Set in user/project config

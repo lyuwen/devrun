@@ -117,11 +117,16 @@ class SWEBenchAgenticTask(BaseTask):
 
         # --- shorthand: build inline dict from top-level params ---
         if not llm_config and model_name:
+            # Prepend "openai/" if no provider prefix (e.g. "anthropic/", "gemini/")
+            if "/" not in str(model_name):
+                model_name = f"openai/{model_name}"
             llm_config = {}
             for param_key, config_key in _LLM_CONFIG_SHORTHAND.items():
                 val = params.get(param_key)
                 if val is not None and val != "":
                     llm_config[config_key] = val
+            # Use the potentially-prefixed model_name
+            llm_config["model"] = model_name
 
         if isinstance(llm_config, dict):
             # Inline dict: resolve format strings ({JOB_ID}, etc.) using

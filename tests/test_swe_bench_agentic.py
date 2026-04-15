@@ -753,6 +753,34 @@ class TestShorthandLlmConfig:
         assert "log_completions" in parsed
         assert parsed["log_completions"] is False
 
+    def test_shorthand_auto_prefix_openai(self):
+        """model_name without provider prefix gets 'openai/' prepended."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(model_name="gpt-4o"))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["model"] == "openai/gpt-4o"
+
+    def test_shorthand_explicit_openai_prefix_unchanged(self):
+        """model_name='openai/gpt-4o' stays as-is (no double prefix)."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(model_name="openai/gpt-4o"))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["model"] == "openai/gpt-4o"
+
+    def test_shorthand_anthropic_prefix_unchanged(self):
+        """model_name='anthropic/claude-...' stays as-is."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(model_name="anthropic/claude-sonnet-4-5"))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["model"] == "anthropic/claude-sonnet-4-5"
+
+    def test_shorthand_gemini_prefix_unchanged(self):
+        """model_name='gemini/gemini-2.5-pro' stays as-is."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(model_name="gemini/gemini-2.5-pro"))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["model"] == "gemini/gemini-2.5-pro"
+
     def test_shorthand_numeric_temperature_no_crash(self):
         """Float temperature=0.7 doesn't crash shell_quote; appears in JSON and shell var."""
         task = SWEBenchAgenticTask()
@@ -792,34 +820,31 @@ class TestConfigVariations:
         return Path(__file__).parent.parent / "devrun" / "configs" / "swe_bench_agentic"
 
     def test_type1_config_parses(self, configs_dir):
-        """type1.yaml should parse as valid YAML without errors."""
+        """type1.yaml should parse as valid YAML with structural overrides only."""
         path = configs_dir / "type1.yaml"
         with open(path) as f:
             data = yaml.safe_load(f)
         assert "params" in data
         assert data["params"]["array"] == "000-499"
         assert data["params"]["concurrency_limit"] == 20
-        assert data["params"]["partition"] == "mini"
-        # Verify inline llm_config is present
-        assert isinstance(data["params"]["llm_config"], dict)
-        assert "model" in data["params"]["llm_config"]
+        # type1 should NOT set user/project-specific fields
+        assert "dataset" not in data["params"]
+        assert "llm_config" not in data["params"]
+        assert "partition" not in data["params"]
 
     def test_type2_config_parses(self, configs_dir):
-        """type2.yaml should parse as valid YAML without errors."""
+        """type2.yaml should parse as valid YAML with structural overrides only."""
         path = configs_dir / "type2.yaml"
         with open(path) as f:
             data = yaml.safe_load(f)
         assert "params" in data
-        assert "instances" in data["params"]
-        assert len(data["params"]["instances"]) == 2
-
-    def test_type2_instances_have_job_id(self, configs_dir):
-        """Each instance in type2.yaml should have a JOB_ID key."""
-        path = configs_dir / "type2.yaml"
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        for instance in data["params"]["instances"]:
-            assert "JOB_ID" in instance
+        assert data["params"]["array"] == "000-499"
+        assert data["params"]["concurrency_limit"] == 16
+        # type2 should NOT set user/project-specific fields
+        assert "dataset" not in data["params"]
+        assert "llm_config" not in data["params"]
+        assert "instances" not in data["params"]
+        assert "partition" not in data["params"]
 
     def test_type1_config_compatible_with_task_config(self, configs_dir):
         """type1.yaml merged with default.yaml should be loadable as TaskConfig."""
@@ -833,7 +858,7 @@ class TestConfigVariations:
         merged = {**base, "params": {**base.get("params", {}), **overlay.get("params", {})}}
         config = TaskConfig(**merged)
         assert config.task == "swe_bench_agentic"
-        assert config.params["partition"] == "mini"
+        assert config.params["concurrency_limit"] == 20
 
     def test_type2_config_compatible_with_task_config(self, configs_dir):
         """type2.yaml merged with default.yaml should be loadable as TaskConfig."""
@@ -846,7 +871,7 @@ class TestConfigVariations:
         merged = {**base, "params": {**base.get("params", {}), **overlay.get("params", {})}}
         config = TaskConfig(**merged)
         assert config.task == "swe_bench_agentic"
-        assert "instances" in config.params
+        assert config.params["concurrency_limit"] == 16
 
     def test_default_config_parses(self, configs_dir):
         """default.yaml should parse and have run_infer_max_attempts and task_id_format."""

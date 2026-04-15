@@ -2,26 +2,15 @@
 # Type 2: Multi-instance — auto-shards the array range across instances,
 # each pointing at a different backend (via JOB_ID env var).
 # Extends default.yaml; only override what differs.
+#
+# User/project-level configs must supply: dataset, llm_config (or model_name),
+# and instances (or job_ids).
 
 params:
-  model_name: "your-model-name"
-  run_name: "type2-run1"
-
-  dataset: "/path/to/SWE-bench_Verified"
   max_iterations: 200
-
-  # Inline llm_config — {JOB_ID} is resolved per-instance at prepare time.
-  llm_config:
-    model: "openai/your-model-name"
-    base_url: "https://api.example.com/{JOB_ID}/v1"
-    api_key: "YOUR_API_KEY"
 
   # Top-level array is split evenly among instances.
   array: "000-499"
   concurrency_limit: 16
   oversubscribe: true
-  partition: "core32"
-
-  instances:
-    - JOB_ID: "if-placeholder-instance1"
-    - JOB_ID: "if-placeholder-instance2"
+  # partition: "core32"         # Set in user/project config
