@@ -618,6 +618,111 @@ def keys_delete(
 
 
 # ---------------------------------------------------------------------------
+# Presets subcommands
+# ---------------------------------------------------------------------------
+
+
+presets_app = typer.Typer(name="presets", help="Manage reusable config presets.")
+app.add_typer(presets_app, name="presets")
+
+
+@presets_app.command("set")
+def presets_set(
+    field: str = typer.Argument(..., help="Preset field (namespace)"),
+    name: str = typer.Argument(..., help="Preset name"),
+    value: Optional[str] = typer.Argument(None, help="Value (plain string)"),
+    json_value: Optional[str] = typer.Option(None, "--json", help="Value as JSON string"),
+    file_path: Optional[Path] = typer.Option(None, "--file", help="Read value from YAML file"),
+) -> None:
+    """Store a preset value under field/name."""
+    from devrun.presets import PresetStore
+
+    sources = sum(x is not None for x in (value, json_value, file_path))
+    if sources != 1:
+        console.print("[red]Error:[/red] Provide exactly one of: positional value, --json, or --file.")
+        raise typer.Exit(code=1)
+
+    if json_value is not None:
+        try:
+            parsed = json.loads(json_value)
+        except json.JSONDecodeError as exc:
+            console.print(f"[red]Error:[/red] Invalid JSON: {exc}")
+            raise typer.Exit(code=1)
+    elif file_path is not None:
+        try:
+            with open(file_path) as fh:
+                parsed = yaml.safe_load(fh)
+        except FileNotFoundError:
+            console.print(f"[red]Error:[/red] File not found: {file_path}")
+            raise typer.Exit(code=1)
+        except yaml.YAMLError as exc:
+            console.print(f"[red]Error:[/red] Invalid YAML: {exc}")
+            raise typer.Exit(code=1)
+    else:
+        parsed = value
+
+    try:
+        PresetStore().set(field, name, parsed)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Preset '{field}.{name}' stored.[/green]")
+
+
+@presets_app.command("get")
+def presets_get(
+    field: str = typer.Argument(..., help="Preset field"),
+    name: str = typer.Argument(..., help="Preset name"),
+) -> None:
+    """Print the value of a preset formatted as YAML."""
+    from devrun.presets import PresetStore
+
+    try:
+        val = PresetStore().get(field, name)
+    except KeyError:
+        console.print(f"[red]Preset '{field}.{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(yaml.dump(val, default_flow_style=False).rstrip())
+
+
+@presets_app.command("list")
+def presets_list(
+    field: Optional[str] = typer.Argument(None, help="Optional field to filter by"),
+) -> None:
+    """List stored presets."""
+    from devrun.presets import PresetStore
+
+    presets = PresetStore().list_presets(field=field)
+    if not presets:
+        console.print("[dim]No presets stored.[/dim]")
+        return
+
+    table = Table(title="Stored Presets")
+    table.add_column("Field", style="cyan")
+    table.add_column("Name", style="green")
+    for f, names in presets.items():
+        for n in names:
+            table.add_row(f, n)
+    console.print(table)
+
+
+@presets_app.command("delete")
+def presets_delete(
+    field: str = typer.Argument(..., help="Preset field"),
+    name: str = typer.Argument(..., help="Preset name"),
+) -> None:
+    """Delete a stored preset."""
+    from devrun.presets import PresetStore
+
+    try:
+        PresetStore().delete(field, name)
+    except KeyError:
+        console.print(f"[red]Preset '{field}.{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Preset '{field}.{name}' deleted.[/green]")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

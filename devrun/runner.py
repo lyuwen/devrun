@@ -203,6 +203,7 @@ class TaskRunner:
     def _load_config(self, target: str, overrides: list[str] | None = None) -> TaskConfig:
         from omegaconf import OmegaConf
         import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
+        import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
 
         config_paths = self._find_configs(target)
         logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
