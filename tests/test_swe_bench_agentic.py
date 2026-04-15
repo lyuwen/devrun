@@ -23,6 +23,22 @@ def _make_params(**kwargs):
     return base
 
 
+def _extract_heredoc_json(command: str) -> dict:
+    """Extract and parse JSON from the __DEVRUN_LLM_EOF__ heredoc block."""
+    lines = command.split("\n")
+    in_heredoc = False
+    json_lines = []
+    for line in lines:
+        if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+            in_heredoc = True
+            continue
+        if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+            break
+        if in_heredoc:
+            json_lines.append(line)
+    return json.loads("\n".join(json_lines))
+
+
 class TestHelpers:
     """Tests for module-level helper functions."""
 
@@ -113,9 +129,9 @@ class TestSWEBenchAgenticTask:
         with pytest.raises(ValueError, match="dataset"):
             task.prepare({"llm_config": "/fake/config.json"})
 
-    def test_prepare_requires_llm_config_or_model(self):
+    def test_prepare_requires_llm_config_or_model_name(self):
         task = SWEBenchAgenticTask()
-        with pytest.raises(ValueError, match="llm_config"):
+        with pytest.raises(ValueError, match="model_name"):
             task.prepare({"dataset": "/fake/dataset"})
 
     def test_prepare_array_flag_in_extra_sbatch(self):
@@ -519,6 +535,237 @@ class TestInlineLlmConfig:
         assert parsed["log_completions"] is True
 
 
+class TestShorthandLlmConfig:
+    """Tests for shorthand llm_config auto-build from top-level params."""
+
+    def _shorthand_params(self, **kwargs):
+        """Base params without llm_config — forces shorthand path."""
+        base = {"dataset": "/fake/dataset", "array": "000-004"}
+        base.update(kwargs)
+        return base
+
+    def test_shorthand_model_name_only(self):
+        """model_name alone → heredoc with {\"model\": \"openai/my-model\"}."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(model_name="openai/my-model"))
+        assert "__DEVRUN_LLM_EOF__" in spec.command
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert parsed == {"model": "openai/my-model"}
+
+    def test_shorthand_model_name_and_api_key(self):
+        """model_name + api_key → both in heredoc JSON."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", api_key="sk-test123",
+        ))
+        assert "__DEVRUN_LLM_EOF__" in spec.command
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert parsed["model"] == "openai/my-model"
+        assert parsed["api_key"] == "sk-test123"
+
+    def test_shorthand_model_name_and_base_url(self):
+        """model_name + base_url → both in JSON."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", base_url="http://localhost:8000/v1",
+        ))
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert parsed["model"] == "openai/my-model"
+        assert parsed["base_url"] == "http://localhost:8000/v1"
+
+    def test_shorthand_all_params(self):
+        """model_name + api_key + base_url + temperature + top_p → all in JSON."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model",
+            api_key="sk-xxx",
+            base_url="http://localhost:8000/v1",
+            temperature="0.7",
+            top_p="0.95",
+        ))
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert parsed["model"] == "openai/my-model"
+        assert parsed["api_key"] == "sk-xxx"
+        assert parsed["base_url"] == "http://localhost:8000/v1"
+        assert parsed["temperature"] == "0.7"
+        assert parsed["top_p"] == "0.95"
+
+    def test_shorthand_does_not_override_explicit_dict(self):
+        """When llm_config dict IS provided, shorthand params are ignored."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/ignored-model",
+            api_key="sk-ignored",
+            llm_config={"model": "openai/explicit-model", "api_key": "sk-explicit"},
+        ))
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert parsed["model"] == "openai/explicit-model"
+        assert parsed["api_key"] == "sk-explicit"
+        assert "openai/ignored-model" not in json.dumps(parsed)
+
+    def test_shorthand_does_not_override_explicit_path(self):
+        """When llm_config is a string path, shorthand params are ignored."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/ignored-model",
+            api_key="sk-ignored",
+            llm_config="/path/to/config.json",
+        ))
+        assert "__DEVRUN_LLM_EOF__" not in spec.command
+        assert "/path/to/config.json" in spec.command
+
+    def test_no_llm_config_no_model_name_raises(self):
+        """Neither llm_config nor model_name → ValueError mentioning model_name."""
+        task = SWEBenchAgenticTask()
+        with pytest.raises(ValueError, match="model_name"):
+            task.prepare(self._shorthand_params())
+
+    def test_shorthand_empty_api_key_excluded(self):
+        """api_key=\"\" should not appear in the built dict."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", api_key="",
+        ))
+        lines = spec.command.split("\n")
+        in_heredoc = False
+        json_lines = []
+        for line in lines:
+            if "__DEVRUN_LLM_EOF__" in line and not in_heredoc:
+                in_heredoc = True
+                continue
+            if "__DEVRUN_LLM_EOF__" in line and in_heredoc:
+                break
+            if in_heredoc:
+                json_lines.append(line)
+        parsed = json.loads("\n".join(json_lines))
+        assert "api_key" not in parsed
+        assert parsed == {"model": "openai/my-model"}
+
+    def test_shorthand_temperature_zero_included(self):
+        """temperature=0 is valid and should be included (not filtered by falsy check)."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", temperature=0,
+        ))
+        parsed = _extract_heredoc_json(spec.command)
+        assert "temperature" in parsed
+        assert parsed["temperature"] == 0
+
+    def test_shorthand_log_completions(self):
+        """model_name + log_completions=True → JSON has log_completions: true."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", log_completions=True,
+        ))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["log_completions"] is True
+
+    def test_shorthand_litellm_extra_body(self):
+        """model_name + litellm_extra_body dict → nested dict in JSON."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model",
+            litellm_extra_body={"thinking": {"enabled": True}},
+        ))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["litellm_extra_body"] == {"thinking": {"enabled": True}}
+
+    def test_shorthand_anthropic_style(self):
+        """Full Anthropic-style shorthand with litellm_extra_body preserved."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="anthropic/claude-opus-4-6-thinking-hz",
+            api_key="sk-ant-xxx",
+            litellm_extra_body={
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": "max"},
+            },
+        ))
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["model"] == "anthropic/claude-opus-4-6-thinking-hz"
+        assert parsed["api_key"] == "sk-ant-xxx"
+        assert parsed["litellm_extra_body"]["thinking"]["type"] == "adaptive"
+        assert parsed["litellm_extra_body"]["thinking"]["display"] == "summarized"
+        assert parsed["litellm_extra_body"]["output_config"]["effort"] == "max"
+
+    def test_shorthand_log_completions_false_included(self):
+        """log_completions=False is included (not filtered by falsy check)."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", log_completions=False,
+        ))
+        parsed = _extract_heredoc_json(spec.command)
+        assert "log_completions" in parsed
+        assert parsed["log_completions"] is False
+
+    def test_shorthand_numeric_temperature_no_crash(self):
+        """Float temperature=0.7 doesn't crash shell_quote; appears in JSON and shell var."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(self._shorthand_params(
+            model_name="openai/my-model", temperature=0.7,
+        ))
+        # Heredoc JSON preserves the float
+        parsed = _extract_heredoc_json(spec.command)
+        assert parsed["temperature"] == 0.7
+        # Template exports TEMPERATURE as a string shell var
+        assert "TEMPERATURE=" in spec.command
+
+
 class TestBaseTaskPrepareMany:
     """Tests for BaseTask.prepare_many default implementation."""
 
@@ -553,6 +800,9 @@ class TestConfigVariations:
         assert data["params"]["array"] == "000-499"
         assert data["params"]["concurrency_limit"] == 20
         assert data["params"]["partition"] == "mini"
+        # Verify inline llm_config is present
+        assert isinstance(data["params"]["llm_config"], dict)
+        assert "model" in data["params"]["llm_config"]
 
     def test_type2_config_parses(self, configs_dir):
         """type2.yaml should parse as valid YAML without errors."""

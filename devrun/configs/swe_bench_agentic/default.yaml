@@ -13,20 +13,25 @@ executor: slurm
 #     - export PYTHONUNBUFFERED=1
 
 params:
-  model_name: "example_model" # Derives llm_config to .llm_config/example_model.json
+  model_name: "example_model"
   run_name: "run1"            # Derives output_dir to logs/run1
 
-  # llm_config: path string to a JSON file, or an inline dict.
-  # When a dict, string values support {VAR} format strings resolved from
-  # params.env (e.g. {JOB_ID}).  The resolved dict is serialized to JSON
-  # and written to a temp file on the remote host at runtime.
+  # llm_config (required): inline dict or explicit file path string.
+  # No file is auto-derived from model_name — the config must be
+  # self-contained so jobs work on remote machines without pre-placed files.
   #
-  # llm_config:
-  #   model: "litellm_proxy/anthropic/claude-opus-4-5-20251101"
-  #   base_url: "https://api.example.com/{JOB_ID}/v1"
-  #   api_key: "YOUR_API_KEY"
-  #   temperature: 1.0
-  #   top_p: 0.95
+  # Inline dict — string values support {VAR} format strings resolved
+  # from params.env (e.g. {JOB_ID}).  The resolved dict is serialized to
+  # JSON and written to a temp file on the remote host at runtime.
+  llm_config:
+    model: "openai/example_model"
+    # base_url: "https://api.example.com/{JOB_ID}/v1"
+    api_key: "YOUR_API_KEY"
+    # temperature: 1.0
+    # top_p: 0.95
+  #
+  # Alternatively, pass an explicit file path (must exist on the remote host):
+  # llm_config: "/absolute/path/to/config.json"
 
   # instances: list of env-var dicts.  When present, the top-level array
   # range is split evenly among instances and each gets its own Slurm job.

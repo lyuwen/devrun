@@ -9,6 +9,11 @@ params:
   dataset: "/path/to/SWE-bench_Verified"
   max_iterations: 200
 
+  # Inline llm_config for single-backend usage.
+  llm_config:
+    model: "openai/your-model-name"
+    api_key: "YOUR_API_KEY"
+
   array: "000-499"
   concurrency_limit: 20
   oversubscribe: true

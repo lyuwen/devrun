@@ -76,6 +76,20 @@ def _format_llm_config(config: Any, env_vars: dict[str, str]) -> Any:
     return config
 
 
+# Top-level param names forwarded into auto-built llm_config dicts.
+# Maps param key → llm_config key.  "model_name" is renamed to "model";
+# all others keep their original names.
+_LLM_CONFIG_SHORTHAND: dict[str, str] = {
+    "model_name": "model",
+    "api_key": "api_key",
+    "base_url": "base_url",
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "log_completions": "log_completions",
+    "litellm_extra_body": "litellm_extra_body",
+}
+
+
 @register_task("swe_bench_agentic")
 class SWEBenchAgenticTask(BaseTask):
     """Prepare an Agentic SWE-bench evaluation job using an OpenHands run_infer script.
@@ -101,6 +115,14 @@ class SWEBenchAgenticTask(BaseTask):
         llm_config = params.get("llm_config")
         llm_config_content: str | None = None  # None = file-path mode
 
+        # --- shorthand: build inline dict from top-level params ---
+        if not llm_config and model_name:
+            llm_config = {}
+            for param_key, config_key in _LLM_CONFIG_SHORTHAND.items():
+                val = params.get(param_key)
+                if val is not None and val != "":
+                    llm_config[config_key] = val
+
         if isinstance(llm_config, dict):
             # Inline dict: resolve format strings ({JOB_ID}, etc.) using
             # env vars, then serialize to JSON.  The template will write
@@ -109,19 +131,18 @@ class SWEBenchAgenticTask(BaseTask):
             resolved = _format_llm_config(llm_config, env_vars)
             llm_config_content = json.dumps(resolved, indent=2)
             llm_config = ""  # not used when content is set
-        elif not llm_config:
-            if model_name:
-                llm_config_dir = params.get("llm_config_dir", ".llm_config")
-                llm_config = f"{llm_config_dir}/{model_name}.json"
-            else:
-                raise ValueError("Either params.llm_config or params.model_name is required")
-
-        if llm_config_content is None and llm_config:
+        elif isinstance(llm_config, str) and llm_config:
+            # Explicit file path — trust the user, but warn if not found locally.
             if not Path(llm_config).is_file():
                 _agentic_logger.warning(
                     "llm_config file not found locally: %s — assuming it exists on the remote host.",
                     llm_config,
                 )
+        else:
+            raise ValueError(
+                "params.llm_config is required (inline dict, explicit file path, "
+                "or provide params.model_name to auto-build)"
+            )
 
         # --- resolve output_dir and run_name ---
         output_dir = params.get("output_dir")
@@ -169,8 +190,8 @@ class SWEBenchAgenticTask(BaseTask):
             model_name=model_name or "",
             base_url=params.get("base_url", ""),
             api_key=params.get("api_key", ""),
-            temperature=params.get("temperature", ""),
-            top_p=params.get("top_p", ""),
+            temperature=str(params.get("temperature", "")),
+            top_p=str(params.get("top_p", "")),
             run_name=run_name or "",
             max_iterations=max_iterations,
             ds_dir=ds_dir,

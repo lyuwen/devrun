@@ -10,6 +10,12 @@ params:
   dataset: "/path/to/SWE-bench_Verified"
   max_iterations: 200
 
+  # Inline llm_config — {JOB_ID} is resolved per-instance at prepare time.
+  llm_config:
+    model: "openai/your-model-name"
+    base_url: "https://api.example.com/{JOB_ID}/v1"
+    api_key: "YOUR_API_KEY"
+
   # Top-level array is split evenly among instances.
   array: "000-499"
   concurrency_limit: 16
