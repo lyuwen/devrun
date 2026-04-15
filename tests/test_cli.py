@@ -38,6 +38,15 @@ class TestCLIList:
         assert "eval" in result.stdout
         assert "local" in result.stdout
 
+    def test_list_shows_variations(self):
+        """Verify list command shows config variations."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["list"])
+
+        assert result.exit_code == 0
+        assert "Variations" in result.stdout
+        assert "swe_bench_eval/slurm" in result.stdout
+
 
 class TestCLIStatus:
     """Tests for the 'status' command."""
@@ -344,3 +353,50 @@ class TestCLIEdgeCases:
 
             # Either succeeds or fails gracefully
             assert result.exit_code in [0, 1]
+
+
+class TestWorkflowCLI:
+    """Tests for workflow subcommands."""
+
+    def test_workflow_list_empty(self):
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "list"])
+        assert result.exit_code == 0
+
+    def test_workflow_status_not_found(self):
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "status", "nonexistent"])
+        assert result.exit_code == 1
+        assert "not found" in result.stdout.lower()
+
+    def test_workflow_cancel_not_found(self):
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "cancel", "nonexistent"])
+        assert result.exit_code == 1
+
+    def test_workflow_logs_not_found(self):
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "logs", "nonexistent"])
+        assert result.exit_code == 1
+
+    def test_workflow_run_missing_config(self):
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "run", "/nonexistent/config.yaml"])
+        assert result.exit_code == 1
+        assert "not found" in result.stdout.lower()
+
+    def test_workflow_run_dry_run(self, tmp_path):
+        config = {
+            "workflow": "test_wf",
+            "stages": [
+                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "run", str(cfg_path), "--dry-run"])
+        assert result.exit_code == 0
+        assert "dry-run" in result.stdout.lower()

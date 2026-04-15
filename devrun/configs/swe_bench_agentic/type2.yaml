@@ -1,0 +1,16 @@
+# configs/swe_bench_agentic/type2.yaml
+# Type 2: Multi-instance — auto-shards the array range across instances,
+# each pointing at a different backend (via JOB_ID env var).
+# Extends default.yaml; only override what differs.
+#
+# User/project-level configs must supply: dataset, llm_config (or model_name),
+# and instances (or job_ids).
+
+params:
+  max_iterations: 200
+
+  # Top-level array is split evenly among instances.
+  array: "000-499"
+  concurrency_limit: 16
+  oversubscribe: true
+  # partition: "core32"         # Set in user/project config

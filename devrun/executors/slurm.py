@@ -102,6 +102,7 @@ class SlurmExecutor(BaseExecutor):
             working_dir=task_spec.working_dir,
             setup_commands=setup_lines,
             output_dir=task_spec.working_dir,
+            set_e=task_spec.metadata.get("set_e", True),
         )
 
         # Write script to a persistent location for debugging

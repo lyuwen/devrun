@@ -25,6 +25,7 @@ def generate_sbatch_script(
     working_dir: str | None = None,
     setup_commands: list[str] | None = None,
     output_dir: str | None = None,
+    set_e: bool = True,
 ) -> str:
     """Return a complete ``#!/bin/bash`` SLURM batch script."""
     lines: list[str] = ["#!/bin/bash"]
@@ -39,12 +40,20 @@ def generate_sbatch_script(
     if partition:
         lines.append(f"#SBATCH --partition={partition}")
     lines.append(f"#SBATCH --time={walltime}")
-    if output_dir:
-        lines.append(f"#SBATCH --output={output_dir}/devrun_%j.out")
-        lines.append(f"#SBATCH --error={output_dir}/devrun_%j.err")
-    else:
-        lines.append("#SBATCH --output=devrun_%j.out")
-        lines.append("#SBATCH --error=devrun_%j.err")
+
+    # Only emit default --output/--error if extra_sbatch doesn't already provide them
+    has_custom_output = any("--output" in e for e in (extra_sbatch or []))
+    has_custom_error = any("--error" in e for e in (extra_sbatch or []))
+    if not has_custom_output:
+        if output_dir:
+            lines.append(f"#SBATCH --output={output_dir}/devrun_%j.out")
+        else:
+            lines.append("#SBATCH --output=devrun_%j.out")
+    if not has_custom_error:
+        if output_dir:
+            lines.append(f"#SBATCH --error={output_dir}/devrun_%j.err")
+        else:
+            lines.append("#SBATCH --error=devrun_%j.err")
 
     for extra in extra_sbatch or []:
         lines.append(f"#SBATCH {extra}")
@@ -65,10 +74,10 @@ def generate_sbatch_script(
 
     # Change to working directory if specified
     if working_dir:
-        lines.append(f"cd {working_dir}")
+        lines.append(f"cd {shlex.quote(working_dir)}")
         lines.append("")
 
-    lines.append("set -ex")
+    lines.append("set -ex" if set_e else "set -x")
     lines.append(command)
     lines.append("")
     return "\n".join(lines)

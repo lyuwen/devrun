@@ -222,3 +222,32 @@ class TestUtilsIntegration:
             # Should use -avz (archive, verbose, compress) by default
             call_str = " ".join(call_args)
             assert "-avz" in call_str or "-a" in call_str
+
+
+class TestGenerateSbatchSetE:
+    def test_default_includes_set_ex(self):
+        from devrun.utils.slurm import generate_sbatch_script
+        script = generate_sbatch_script("echo hello")
+        assert "set -ex" in script
+
+    def test_set_e_false_uses_set_x_only(self):
+        from devrun.utils.slurm import generate_sbatch_script
+        script = generate_sbatch_script("echo hello", set_e=False)
+        assert "set -x" in script
+        assert "set -ex" not in script
+
+    def test_extra_sbatch_output_skips_default_output(self):
+        from devrun.utils.slurm import generate_sbatch_script
+        script = generate_sbatch_script(
+            "echo hello",
+            extra_sbatch=["--output=custom_%A_%a.out", "--error=custom_%A_%a.err"],
+        )
+        lines = script.splitlines()
+        output_lines = [l for l in lines if "#SBATCH --output" in l]
+        assert len(output_lines) == 1
+        assert "custom_%A_%a.out" in output_lines[0]
+
+    def test_no_extra_output_uses_default(self):
+        from devrun.utils.slurm import generate_sbatch_script
+        script = generate_sbatch_script("echo hello")
+        assert "devrun_%j.out" in script

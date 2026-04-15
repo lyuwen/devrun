@@ -1,0 +1,92 @@
+{# SWE-bench agentic inference script template.
+   Rendered by SWEBenchAgenticTask.prepare() via devrun/utils/templates.py.
+
+   Required variables:
+     dataset, model_name, base_url, api_key, temperature, top_p,
+     run_name, max_iterations, ds_dir, task_id_format, output_dir,
+     max_attempts, run_infer_max_attempts, script, llm_config,
+     llm_config_content, split, select_dir, workspace, extra_flags,
+     env_commands, env_vars, git_safe_dirs
+
+#}
+{# env_commands are rendered raw intentionally — they are arbitrary shell
+   preamble lines provided by the user (e.g. conda activate, module load). #}
+{% for cmd in env_commands %}
+{{ cmd }}
+{% endfor %}
+{% for d in git_safe_dirs %}
+git config --global --add safe.directory {{ d | shell_quote }}
+{% endfor %}
+
+export DATASET={{ dataset | shell_quote }}
+export MODEL_NAME={{ model_name | shell_quote }}
+export BASE_URL={{ base_url | shell_quote }}
+export API_KEY={{ api_key | shell_quote }}
+export TEMPERATURE={{ temperature | shell_quote }}
+export TOP_P={{ top_p | shell_quote }}
+export DIRNAME={{ run_name | shell_quote }}
+export MAX_ITER={{ max_iterations }}
+{% for k, v in env_vars.items() %}
+export {{ k }}={{ v | shell_quote }}
+{% endfor %}
+
+DS_DIR={{ ds_dir | shell_quote }}
+
+set -x
+
+num=$(printf "{{ task_id_format }}\n" ${SLURM_ARRAY_TASK_ID:-0})
+OUTPUT_PATH={{ output_dir | shell_quote }}/${num}
+mkdir -p "${OUTPUT_PATH}"
+echo "Processing ${num} -> ${OUTPUT_PATH}"
+
+{% if llm_config_content %}
+_LLM_CONFIG=$(mktemp /tmp/devrun_llm_config_XXXXXX.json)
+trap 'rm -f "${_LLM_CONFIG}"' EXIT
+cat > "${_LLM_CONFIG}" << '__DEVRUN_LLM_EOF__'
+{{ llm_config_content }}
+__DEVRUN_LLM_EOF__
+{% else %}
+_LLM_CONFIG={{ llm_config | shell_quote }}
+{% endif %}
+
+for attempt in {1..{{ max_attempts }}}; do
+    echo "Attempt ${attempt} of {{ max_attempts }}..."
+
+    # Check if previous run produced a valid output — skip if so
+    if ls "${OUTPUT_PATH}/${DS_DIR}"/*/*/output.jsonl >/dev/null 2>&1; then
+        LINE_COUNT=$(wc -l < $(ls "${OUTPUT_PATH}/${DS_DIR}"/*/*/output.jsonl | head -n 1))
+        if [[ ${LINE_COUNT} -gt 0 ]]; then
+            echo "Job already finished. Exit"
+            exit 0
+        fi
+    fi
+
+    # Archive failed previous run if directory exists
+    if [[ -d "${OUTPUT_PATH}/${DS_DIR}" ]]; then
+        TS=$(date +"%Y%m%d-%H%M%S")
+        mkdir -p "${OUTPUT_PATH}/old"
+        mv "${OUTPUT_PATH}/${DS_DIR}" "${OUTPUT_PATH}/old/${DS_DIR}-${TS}"
+    fi
+
+    python {{ script | shell_quote }} "${_LLM_CONFIG}" \
+        --dataset ${DATASET} \
+        --split {{ split | shell_quote }} \
+        --max-iterations {{ max_iterations }} \
+        --max-attempts {{ run_infer_max_attempts }} \
+        --select {{ select_dir | shell_quote }}/${num}.txt \
+        --workspace {{ workspace | shell_quote }} \
+        --output-dir "${OUTPUT_PATH}"{% for flag in extra_flags %} \
+        {{ flag }}{% endfor %}
+
+    # Post-run completion check
+    if ls "${OUTPUT_PATH}/${DS_DIR}"/*/*/output.jsonl >/dev/null 2>&1; then
+        LINE_COUNT=$(wc -l < $(ls "${OUTPUT_PATH}/${DS_DIR}"/*/*/output.jsonl | head -n 1))
+        if [[ ${LINE_COUNT} -gt 0 ]]; then
+            echo "Job finished successfully on attempt ${attempt}."
+            exit 0
+        fi
+    fi
+done
+
+echo "Reached the limit of {{ max_attempts }} attempts. Job considered not solvable."
+exit 0

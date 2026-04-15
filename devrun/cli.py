@@ -12,6 +12,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+import yaml
+
 from devrun.runner import TaskRunner
 from devrun.registry import list_tasks, list_executors
 from devrun.utils.sync import sync_to_remote, fetch_from_remote
@@ -182,15 +184,32 @@ def run(
 
 @app.command("list")
 def list_plugins() -> None:
-    """List available task and executor plugins."""
+    """List available task and executor plugins, including config variations."""
+    from devrun.runner import get_config_dirs
+
     table = Table(title="Registered Plugins")
     table.add_column("Type", style="cyan")
     table.add_column("Name", style="green")
+    table.add_column("Variations", style="dim")
+
+    # Collect variations per task by scanning config directories
+    config_dirs = get_config_dirs()
+    task_variations: dict[str, set[str]] = {}
+    for d in config_dirs:
+        if not d.is_dir():
+            continue
+        for child in d.iterdir():
+            if child.is_dir():
+                for yaml_file in child.glob("*.yaml"):
+                    stem = yaml_file.stem
+                    task_variations.setdefault(child.name, set()).add(stem)
 
     for name in list_tasks():
-        table.add_row("task", name)
+        variations = sorted(task_variations.get(name, set()))
+        variations_str = ", ".join(f"{name}/{v}" for v in variations if v != "default")
+        table.add_row("task", name, variations_str)
     for name in list_executors():
-        table.add_row("executor", name)
+        table.add_row("executor", name, "")
     console.print(table)
 
 
@@ -293,6 +312,50 @@ def cancel(
         raise typer.Exit(code=1)
 
 
+@app.command("doctor")
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Auto-fix deprecated config parameters"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show all checks, including passing"),
+) -> None:
+    """Check config health: validate schemas, detect deprecations, flag placeholders."""
+    from devrun.doctor import run_doctor, Severity
+
+    report = run_doctor(fix=fix, verbose=verbose)
+
+    if report.diagnostics or verbose:
+        table = Table(title="Doctor Report")
+        table.add_column("Severity", style="bold")
+        table.add_column("File")
+        table.add_column("Rule", style="dim")
+        table.add_column("Message")
+
+        severity_styles = {
+            Severity.ERROR: "red",
+            Severity.WARNING: "yellow",
+            Severity.INFO: "blue",
+        }
+
+        for d in report.diagnostics:
+            style = severity_styles.get(d.severity, "")
+            fixed = " [green](fixed)[/green]" if d.fix_applied else ""
+            table.add_row(
+                f"[{style}]{d.severity.value.upper()}[/{style}]",
+                d.file_path,
+                d.rule_id,
+                d.message + fixed,
+            )
+        console.print(table)
+
+    # Summary
+    console.print(
+        f"\n[bold]Summary:[/bold] {report.error_count} error(s), "
+        f"{report.warning_count} warning(s), {report.info_count} info"
+    )
+
+    if report.has_errors:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def sync(
     source: str = typer.Argument(..., help="Source path (local or remote:path)"),
@@ -327,6 +390,336 @@ def fetch(
     else:
         console.print(f"[red]✗ Fetch failed:[/red] {result.stderr}")
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# Workflow subcommands
+# ---------------------------------------------------------------------------
+
+
+workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows.")
+app.add_typer(workflow_app, name="workflow")
+
+
+@workflow_app.command("run")
+def workflow_run(
+    config_path: str = typer.Argument(..., help="Path to workflow YAML config"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run a multi-stage workflow from a YAML config."""
+    _setup_logging(verbose)
+
+    config_file = Path(config_path)
+    if not config_file.exists():
+        console.print(f"[red]Error:[/red] Config not found: {config_path}")
+        raise typer.Exit(code=1)
+
+    from devrun.models import WorkflowConfig
+
+    with open(config_file) as fh:
+        raw = yaml.safe_load(fh)
+
+    try:
+        cfg = WorkflowConfig(**raw)
+    except Exception as exc:
+        console.print(f"[red]Error parsing workflow config:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    result = runner.run(cfg, dry_run=dry_run)
+
+    if dry_run:
+        console.print(result)
+        console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
+    else:
+        console.print(f"[green]Workflow completed:[/green] {result}")
+
+
+@workflow_app.command("status")
+def workflow_status(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to query"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Check status of a workflow."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    record = runner.status(workflow_id)
+    if not record:
+        console.print(f"[red]Workflow {workflow_id} not found.[/red]")
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"Workflow {workflow_id}")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Name", record["workflow_name"])
+    table.add_row("Status", record["status"])
+    table.add_row("Created", record["created_at"])
+    table.add_row("Completed", record.get("completed_at") or "—")
+
+    stages = json.loads(record.get("stages_state", "{}"))
+    for name, state in stages.items():
+        status_str = state.get("status", "unknown")
+        job_id = state.get("job_id", "—")
+        table.add_row(f"  Stage: {name}", f"{status_str} (job: {job_id})")
+
+    console.print(table)
+
+
+@workflow_app.command("list")
+def workflow_list(
+    limit: int = typer.Option(20, "--limit", "-n", help="Max workflows to show"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """List recent workflows."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    records = runner.list_workflows(limit=limit)
+
+    if not records:
+        console.print("[dim]No workflows found.[/dim]")
+        return
+
+    table = Table(title="Recent Workflows")
+    table.add_column("ID", style="bold")
+    table.add_column("Name", style="cyan")
+    table.add_column("Status")
+    table.add_column("Created")
+
+    for rec in records:
+        status_val = rec.get("status", "unknown")
+        style = {"completed": "green", "failed": "red", "running": "yellow", "timed_out": "red"}.get(status_val, "dim")
+        table.add_row(
+            rec["workflow_id"],
+            rec["workflow_name"],
+            f"[{style}]{status_val}[/{style}]",
+            rec.get("created_at", ""),
+        )
+    console.print(table)
+
+
+@workflow_app.command("logs")
+def workflow_logs(
+    workflow_id: str = typer.Argument(..., help="Workflow ID"),
+    stage: Optional[str] = typer.Option(None, "--stage", "-s", help="Specific stage name"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Show logs for a workflow or specific stage."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    try:
+        output = runner.logs(workflow_id, stage=stage)
+        console.print(output)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+
+@workflow_app.command("cancel")
+def workflow_cancel(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to cancel"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Cancel all active stages of a workflow."""
+    _setup_logging(verbose)
+
+    from devrun.workflow import WorkflowRunner
+
+    runner = WorkflowRunner()
+    try:
+        runner.cancel(workflow_id)
+        console.print(f"[green]Workflow {workflow_id} cancelled.[/green]")
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# Keys subcommands
+# ---------------------------------------------------------------------------
+
+
+keys_app = typer.Typer(name="keys", help="Manage stored secrets.")
+app.add_typer(keys_app, name="keys")
+
+
+@keys_app.command("set")
+def keys_set(
+    name: str = typer.Argument(..., help="Key name"),
+    value: str = typer.Argument(..., help="Secret value to store"),
+) -> None:
+    """Store a secret value under a given name."""
+    from devrun.keystore import KeyStore
+
+    try:
+        KeyStore().set(name, value)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Key '{name}' stored.[/green]")
+
+
+@keys_app.command("get")
+def keys_get(
+    name: str = typer.Argument(..., help="Key name"),
+) -> None:
+    """Print the plain-text value for a stored key."""
+    from devrun.keystore import KeyStore
+
+    try:
+        value = KeyStore().get(name)
+    except KeyError:
+        console.print(f"[red]Key '{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(value)
+
+
+@keys_app.command("list")
+def keys_list() -> None:
+    """List all stored key names."""
+    from devrun.keystore import KeyStore
+
+    names = KeyStore().list_keys()
+    if not names:
+        console.print("[dim]No keys stored.[/dim]")
+        return
+
+    table = Table(title="Stored Keys")
+    table.add_column("Name", style="cyan")
+    for n in names:
+        table.add_row(n)
+    console.print(table)
+
+
+@keys_app.command("delete")
+def keys_delete(
+    name: str = typer.Argument(..., help="Key name"),
+) -> None:
+    """Delete a stored key."""
+    from devrun.keystore import KeyStore
+
+    try:
+        KeyStore().delete(name)
+    except KeyError:
+        console.print(f"[red]Key '{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Key '{name}' deleted.[/green]")
+
+
+# ---------------------------------------------------------------------------
+# Presets subcommands
+# ---------------------------------------------------------------------------
+
+
+presets_app = typer.Typer(name="presets", help="Manage reusable config presets.")
+app.add_typer(presets_app, name="presets")
+
+
+@presets_app.command("set")
+def presets_set(
+    field: str = typer.Argument(..., help="Preset field (namespace)"),
+    name: str = typer.Argument(..., help="Preset name"),
+    value: Optional[str] = typer.Argument(None, help="Value (plain string)"),
+    json_value: Optional[str] = typer.Option(None, "--json", help="Value as JSON string"),
+    file_path: Optional[Path] = typer.Option(None, "--file", help="Read value from YAML file"),
+) -> None:
+    """Store a preset value under field/name."""
+    from devrun.presets import PresetStore
+
+    sources = sum(x is not None for x in (value, json_value, file_path))
+    if sources != 1:
+        console.print("[red]Error:[/red] Provide exactly one of: positional value, --json, or --file.")
+        raise typer.Exit(code=1)
+
+    if json_value is not None:
+        try:
+            parsed = json.loads(json_value)
+        except json.JSONDecodeError as exc:
+            console.print(f"[red]Error:[/red] Invalid JSON: {exc}")
+            raise typer.Exit(code=1)
+    elif file_path is not None:
+        try:
+            with open(file_path) as fh:
+                parsed = yaml.safe_load(fh)
+        except FileNotFoundError:
+            console.print(f"[red]Error:[/red] File not found: {file_path}")
+            raise typer.Exit(code=1)
+        except yaml.YAMLError as exc:
+            console.print(f"[red]Error:[/red] Invalid YAML: {exc}")
+            raise typer.Exit(code=1)
+    else:
+        parsed = value
+
+    try:
+        PresetStore().set(field, name, parsed)
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Preset '{field}.{name}' stored.[/green]")
+
+
+@presets_app.command("get")
+def presets_get(
+    field: str = typer.Argument(..., help="Preset field"),
+    name: str = typer.Argument(..., help="Preset name"),
+) -> None:
+    """Print the value of a preset formatted as YAML."""
+    from devrun.presets import PresetStore
+
+    try:
+        val = PresetStore().get(field, name)
+    except KeyError:
+        console.print(f"[red]Preset '{field}.{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(yaml.dump(val, default_flow_style=False).rstrip())
+
+
+@presets_app.command("list")
+def presets_list(
+    field: Optional[str] = typer.Argument(None, help="Optional field to filter by"),
+) -> None:
+    """List stored presets."""
+    from devrun.presets import PresetStore
+
+    presets = PresetStore().list_presets(field=field)
+    if not presets:
+        console.print("[dim]No presets stored.[/dim]")
+        return
+
+    table = Table(title="Stored Presets")
+    table.add_column("Field", style="cyan")
+    table.add_column("Name", style="green")
+    for f, names in presets.items():
+        for n in names:
+            table.add_row(f, n)
+    console.print(table)
+
+
+@presets_app.command("delete")
+def presets_delete(
+    field: str = typer.Argument(..., help="Preset field"),
+    name: str = typer.Argument(..., help="Preset name"),
+) -> None:
+    """Delete a stored preset."""
+    from devrun.presets import PresetStore
+
+    try:
+        PresetStore().delete(field, name)
+    except KeyError:
+        console.print(f"[red]Preset '{field}.{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Preset '{field}.{name}' deleted.[/green]")
 
 
 # ---------------------------------------------------------------------------

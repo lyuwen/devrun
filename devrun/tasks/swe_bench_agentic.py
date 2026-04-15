@@ -2,14 +2,92 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import logging as _logging
+from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 from devrun.models import TaskSpec
 from devrun.registry import register_task
 from devrun.tasks.base import BaseTask
+from devrun.utils.swebench import derive_ds_dir
+from devrun.utils.templates import render_template
 
 _agentic_logger = _logging.getLogger("devrun.tasks.swe_bench_agentic")
+
+
+# --------------- Helpers ---------------
+
+
+def _parse_array_range(array_str: str) -> tuple[int, int, int]:
+    """Parse a zero-padded array range string like ``"000-499"``.
+
+    Returns ``(start, end, pad_width)`` where *pad_width* is the number of
+    digits in the original string (e.g. 3 for ``"000"``).
+    """
+    parts = array_str.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid array range: {array_str!r} (expected 'START-END')")
+    pad_width = len(parts[0])
+    return int(parts[0]), int(parts[1]), pad_width
+
+
+def _compute_shard_ranges(
+    start: int, end: int, n: int, pad_width: int
+) -> list[str]:
+    """Divide ``[start, end]`` into *n* contiguous chunks.
+
+    Remainder items are distributed one-per-chunk to the earlier chunks.
+    Returns a list of zero-padded range strings.
+    """
+    total = end - start + 1
+    if n <= 0:
+        raise ValueError("Number of shards must be positive")
+    if n > total:
+        raise ValueError(
+            f"Cannot create {n} shards from {total} items (array {start}-{end})"
+        )
+    chunk_size, remainder = divmod(total, n)
+    ranges: list[str] = []
+    offset = start
+    for i in range(n):
+        size = chunk_size + (1 if i < remainder else 0)
+        chunk_end = offset + size - 1
+        ranges.append(f"{offset:0{pad_width}d}-{chunk_end:0{pad_width}d}")
+        offset = chunk_end + 1
+    return ranges
+
+
+def _format_llm_config(config: Any, env_vars: dict[str, str]) -> Any:
+    """Recursively format string values in *config* using *env_vars*.
+
+    Uses :meth:`str.format_map` with a :class:`defaultdict` so that
+    unknown placeholders resolve to empty strings instead of raising.
+    """
+    fmt = defaultdict(str, env_vars)
+    if isinstance(config, dict):
+        return {k: _format_llm_config(v, env_vars) for k, v in config.items()}
+    if isinstance(config, list):
+        return [_format_llm_config(v, env_vars) for v in config]
+    if isinstance(config, str):
+        return config.format_map(fmt)
+    return config
+
+
+# Top-level param names forwarded into auto-built llm_config dicts.
+# Maps param key → llm_config key.  "model_name" is renamed to "model";
+# all others keep their original names.
+_LLM_CONFIG_SHORTHAND: dict[str, str] = {
+    "model_name": "model",
+    "api_key": "api_key",
+    "base_url": "base_url",
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "log_completions": "log_completions",
+    "litellm_extra_body": "litellm_extra_body",
+}
 
 
 @register_task("swe_bench_agentic")
@@ -33,39 +111,45 @@ class SWEBenchAgenticTask(BaseTask):
         model_name = params.get("model_name")
         run_name = params.get("run_name")
 
+        # --- resolve llm_config ---
         llm_config = params.get("llm_config")
+        llm_config_content: str | None = None  # None = file-path mode
 
-        # If the user passed a dictionary directly into YAML, serialize it to a JSON file
+        # --- shorthand: build inline dict from top-level params ---
+        if not llm_config and model_name:
+            # Prepend "openai/" if no provider prefix (e.g. "anthropic/", "gemini/")
+            if "/" not in str(model_name):
+                model_name = f"openai/{model_name}"
+            llm_config = {}
+            for param_key, config_key in _LLM_CONFIG_SHORTHAND.items():
+                val = params.get(param_key)
+                if val is not None and val != "":
+                    llm_config[config_key] = val
+            # Use the potentially-prefixed model_name
+            llm_config["model"] = model_name
+
         if isinstance(llm_config, dict):
-            import json
-            from pathlib import Path
-
-            config_name = model_name or run_name or "custom_llm"
-            llm_config_dir = Path(params.get("llm_config_dir", ".llm_config"))
-            llm_config_dir.mkdir(parents=True, exist_ok=True)
-
-            generated_path = llm_config_dir / f"{config_name}.json"
-            with open(generated_path, "w", encoding="utf-8") as f:
-                json.dump(llm_config, f, indent=2)
-
-            llm_config = str(generated_path)
-
-        if not llm_config:
-            if model_name:
-                llm_config_dir = params.get("llm_config_dir", ".llm_config")
-                llm_config = f"{llm_config_dir}/{model_name}.json"
-            else:
-                raise ValueError("Either params.llm_config or params.model_name is required")
-
-        # Warn (but don't block) if the resolved config doesn't exist locally —
-        # it may exist on the remote host.
-        from pathlib import Path
-        if not Path(llm_config).is_file():
-            _agentic_logger.warning(
-                "llm_config file not found locally: %s — assuming it exists on the remote host.",
-                llm_config,
+            # Inline dict: resolve format strings ({JOB_ID}, etc.) using
+            # env vars, then serialize to JSON.  The template will write
+            # this to a temp file on the remote machine.
+            env_vars = params.get("env", {})
+            resolved = _format_llm_config(llm_config, env_vars)
+            llm_config_content = json.dumps(resolved, indent=2)
+            llm_config = ""  # not used when content is set
+        elif isinstance(llm_config, str) and llm_config:
+            # Explicit file path — trust the user, but warn if not found locally.
+            if not Path(llm_config).is_file():
+                _agentic_logger.warning(
+                    "llm_config file not found locally: %s — assuming it exists on the remote host.",
+                    llm_config,
+                )
+        else:
+            raise ValueError(
+                "params.llm_config is required (inline dict, explicit file path, "
+                "or provide params.model_name to auto-build)"
             )
 
+        # --- resolve output_dir and run_name ---
         output_dir = params.get("output_dir")
         if not output_dir:
             logs_dir = params.get("logs_dir", "logs")
@@ -75,19 +159,6 @@ class SWEBenchAgenticTask(BaseTask):
             output_dir = f"{logs_dir}/{run_name}"
 
         dataset = params.get("dataset")
-        split = params.get("split", "test")
-        max_iterations = params.get("max_iterations", 100)
-        select_dir = params.get("select_dir", "job_array")
-        workspace = params.get("workspace", "docker")
-        task_id_format = params.get("task_id_format", "%05d")
-        base_url = params.get("base_url")
-        api_key = params.get("api_key")
-        temperature = params.get("temperature")
-        top_p = params.get("top_p")
-        
-        array = params.get("array")
-        concurrency_limit = params.get("concurrency_limit")
-
         if not dataset:
             raise ValueError("params.dataset is required")
 
@@ -97,69 +168,60 @@ class SWEBenchAgenticTask(BaseTask):
                 dataset,
             )
 
+        split = params.get("split", "test")
+        max_iterations = params.get("max_iterations", 100)
+        max_attempts = params.get("max_attempts", 5)
+        run_infer_max_attempts = params.get("run_infer_max_attempts", 5)
+        select_dir = params.get("select_dir", "job_array")
+        workspace = params.get("workspace", "docker")
+        task_id_format = params.get("task_id_format", "%03d")
+        working_dir = params.get("working_dir")
+
+        # Derive DS_DIR (shared utility ensures consistency with collect task)
+        ds_dir = params.get("ds_dir") or derive_ds_dir(dataset, split)
+
         script = self._get_run_script(params)
         flags = self._get_default_flags(params)
-
         env_commands = params.get("env_commands", [])
-
-        # Bash automation to resolve the SLURM_ARRAY_TASK_ID into the formatted number
-        command_lines = []
-        for cmd in env_commands:
-            command_lines.append(cmd)
-            
-        # Export key variables for use in llm_config template and shell logic
-        command_lines.extend([
-            "",
-            f"export DATASET={dataset}",
-            f"export MODEL_NAME={model_name or ''}",
-            f"export BASE_URL={base_url or ''}",
-            f"export API_KEY={api_key or ''}",
-            f"export TEMPERATURE={temperature or ''}",
-            f"export TOP_P={top_p or ''}",
-            f"export DIRNAME={run_name or ''}",
-            f"export MAX_ITER={max_iterations}",
-        ])
-        
-        # Export any additional environment variables from params.env
-        # These will also be exported by SlurmExecutor via TaskSpec.env, 
-        # but having them in the script is good for transparency and shell expansion.
         env_vars = params.get("env", {})
-        for k, v in env_vars.items():
-            command_lines.append(f"export {k}={v}")
+        git_safe_dirs = params.get("git_safe_dirs", [])
 
-        command_lines.extend([
-            "",
-            f'num=$(printf "{task_id_format}\\n" ${{SLURM_ARRAY_TASK_ID:-0}})',
-            f'OUTPUT_PATH="{output_dir}/${{num}}"',
-            f'mkdir -p "${{OUTPUT_PATH}}"',
-            f'echo "Processing ${{num}} -> ${{OUTPUT_PATH}}"',
-        ])
+        # Render the bash command via Jinja2 template
+        command = render_template(
+            "swe_bench_agentic.sh.j2",
+            env_commands=env_commands,
+            git_safe_dirs=git_safe_dirs,
+            dataset=dataset,
+            model_name=model_name or "",
+            base_url=params.get("base_url", ""),
+            api_key=params.get("api_key", ""),
+            temperature=str(params.get("temperature", "")),
+            top_p=str(params.get("top_p", "")),
+            run_name=run_name or "",
+            max_iterations=max_iterations,
+            ds_dir=ds_dir,
+            task_id_format=task_id_format,
+            output_dir=output_dir,
+            max_attempts=max_attempts,
+            run_infer_max_attempts=run_infer_max_attempts,
+            script=script,
+            llm_config=llm_config,
+            llm_config_content=llm_config_content,
+            split=split,
+            select_dir=select_dir,
+            workspace=workspace,
+            extra_flags=flags,
+            env_vars=env_vars,
+        )
 
-        # Build the python command with proper backslash continuation
-        python_args = [
-            f"python {script} {llm_config}",
-            f"    --dataset ${{DATASET}}",
-            f"    --split {split}",
-            f"    --max-iterations {max_iterations}",
-            f"    --select {select_dir}/${{num}}.txt",
-            f"    --workspace {workspace}",
-            f'    --output-dir "${{OUTPUT_PATH}}"',
-        ]
-        for flag in flags:
-            python_args.append(f"    {flag}")
-
-        python_cmd = " \\\n".join(python_args)
-        command_lines.append(python_cmd)
-
-        command = "\n".join(command_lines)
-
+        # --- resources and extra_sbatch ---
         resources = {}
-        # Parse standard slurm resources
         for k in ["nodes", "gpus_per_node", "gpus", "walltime", "partition", "mem", "cpus_per_task", "job_name"]:
             if k in params:
                 resources[k] = params[k]
 
-        # Forward the --array flag to Slurm via extra_sbatch
+        array = params.get("array")
+        concurrency_limit = params.get("concurrency_limit")
         extra_sbatch = []
         if array:
             array_str = str(array)
@@ -168,23 +230,60 @@ class SWEBenchAgenticTask(BaseTask):
             extra_sbatch.append(f"--array {array_str}")
             extra_sbatch.append("--output=slurm_logs/slurm-%A_%a.out")
             extra_sbatch.append("--error=slurm_logs/slurm-%A_%a.err")
-            # mkdir -p slurm_logs must be the first command in the script
-            command_lines.insert(0, "mkdir -p slurm_logs")
-            command = "\n".join(command_lines)
+            command = "mkdir -p slurm_logs\n" + command
 
         if params.get("oversubscribe", False):
             extra_sbatch.append("--oversubscribe")
 
         if extra_sbatch:
-            # We assume SlurmExecutor supports extra_sbatch injected via resources
             resources["extra_sbatch"] = extra_sbatch
-
-        working_dir = params.get("working_dir")
 
         return TaskSpec(
             command=command,
             resources=resources,
-            env=params.get("env", {}),
+            env=env_vars,
             working_dir=working_dir,
-            metadata={"job_name": resources.get("job_name", "swe_agentic")},
+            metadata={
+                "job_name": resources.get("job_name", "swe_agentic"),
+                "set_e": False,  # retry loop requires set -x only, not set -e
+            },
         )
+
+    def prepare_many(self, params: dict[str, Any]) -> list[TaskSpec]:
+        """Expand ``instances`` into multiple :class:`TaskSpec` objects.
+
+        When *params* contains an ``instances`` list, each entry is a dict
+        of environment variables (e.g. ``{JOB_ID: "if-abc123"}``).  The
+        top-level ``array`` range is divided evenly among the instances,
+        and each instance gets its own :class:`TaskSpec` via :meth:`prepare`.
+
+        Without ``instances``, falls back to the default single-spec behaviour.
+
+        Shorthand: ``job_ids`` (comma-separated string) is expanded into
+        ``instances`` automatically, e.g. ``"id1,id2,id3"`` becomes
+        ``[{JOB_ID: "id1"}, {JOB_ID: "id2"}, {JOB_ID: "id3"}]``.
+        ``job_ids`` takes precedence over ``instances`` when both are present.
+        """
+        job_ids = params.get("job_ids")
+        if job_ids:
+            instances = [{"JOB_ID": jid.strip()} for jid in str(job_ids).split(",")]
+        else:
+            instances = params.get("instances")
+        if not instances:
+            return [self.prepare(params)]
+
+        array_str = params.get("array")
+        if not array_str:
+            raise ValueError("params.array is required when using instances")
+
+        start, end, pad_width = _parse_array_range(str(array_str))
+        ranges = _compute_shard_ranges(start, end, len(instances), pad_width)
+
+        specs: list[TaskSpec] = []
+        for instance, array_range in zip(instances, ranges):
+            merged = copy.deepcopy(params)
+            merged.pop("instances", None)
+            merged["array"] = array_range
+            merged.setdefault("env", {}).update(instance)
+            specs.append(self.prepare(merged))
+        return specs

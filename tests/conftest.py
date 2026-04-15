@@ -268,6 +268,38 @@ def inference_params():
 
 
 # ============================================================================
+# KeyStore fixture
+# ============================================================================
+
+@pytest.fixture
+def tmp_keystore(tmp_path, monkeypatch):
+    """Provide a KeyStore backed by a temp directory, isolated from ~/.devrun."""
+    from devrun.keystore import KeyStore
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    store = KeyStore(path=fake_home / ".devrun" / "keys.yaml")
+    return store
+
+
+# ============================================================================
+# PresetStore fixture
+# ============================================================================
+
+@pytest.fixture
+def tmp_presets(tmp_path, monkeypatch):
+    """Provide a PresetStore backed by a temp directory, isolated from ~/.devrun."""
+    from devrun.presets import PresetStore
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    store = PresetStore(path=fake_home / ".devrun" / "presets.yaml")
+    return store
+
+
+# ============================================================================
 # Ensure registrations are loaded at session start
 # ============================================================================
 

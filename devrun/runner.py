@@ -20,6 +20,16 @@ from devrun.router import resolve_executor, load_executor_configs
 logger = logging.getLogger("devrun.runner")
 
 
+def get_config_dirs() -> list[Path]:
+    """Return the ordered list of config search directories (lowest → highest priority)."""
+    devrun_repo_root = Path(__file__).parent.parent
+    return [
+        devrun_repo_root / "devrun" / "configs",
+        Path.home() / ".devrun" / "configs",
+        Path.cwd() / ".devrun" / "configs",
+    ]
+
+
 class TaskRunner:
     """Loads task configs, expands sweeps, prepares tasks, and dispatches to executors."""
 
@@ -27,14 +37,7 @@ class TaskRunner:
         self._executors_path = executors_path
         self._executor_configs = None  # lazy
         self._db = JobStore(db_path)
-        # We need a stable reference to the installed repository's config directory.
-        # This allows devrun to be executed from anywhere while still finding default templates.
-        devrun_repo_root = Path(__file__).parent.parent
-        self._config_dirs = [
-            devrun_repo_root / "devrun" / "configs",
-            Path.home() / ".devrun" / "configs",
-            Path.cwd() / ".devrun" / "configs"
-        ]
+        self._config_dirs = get_config_dirs()
 
     # ---- lazy config loading ---------------------------------------------
 
@@ -93,10 +96,26 @@ class TaskRunner:
 
         for params in param_combos:
             if dry_run:
-                logger.info("DRY RUN: Would submit task='%s', executor='%s', params=%s", cfg.task, cfg.executor, params)
+                task_cls = get_task_class(cfg.task)
+                task = task_cls()
+                specs: list[TaskSpec] = task.prepare_many(params)
+                for i, spec in enumerate(specs):
+                    label = f"spec {i + 1}/{len(specs)}" if len(specs) > 1 else "spec"
+                    header = (
+                        f"# DRY RUN [{label}]: task={cfg.task}, executor={cfg.executor}"
+                    )
+                    if spec.working_dir:
+                        header += f", working_dir={spec.working_dir}"
+                    lines = [header]
+                    if spec.resources:
+                        lines.append(f"# resources: {spec.resources}")
+                    if spec.env:
+                        lines.append(f"# env: {spec.env}")
+                    lines.append("")
+                    lines.append(spec.command)
+                    print("\n".join(lines))
             else:
-                job_id = self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env)
-                job_ids.append(job_id)
+                job_ids.extend(self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env))
 
         return job_ids
 
@@ -152,8 +171,7 @@ class TaskRunner:
         if not record:
             raise ValueError(f"Job {job_id} not found")
         params = record.params_dict
-        new_id = self._submit_single(record.task_name, record.executor, params)
-        return [new_id]
+        return self._submit_single(record.task_name, record.executor, params)
 
     def cancel(self, job_id: str) -> None:
         """Cancel a running job."""
@@ -184,6 +202,8 @@ class TaskRunner:
 
     def _load_config(self, target: str, overrides: list[str] | None = None) -> TaskConfig:
         from omegaconf import OmegaConf
+        import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
+        import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
 
         config_paths = self._find_configs(target)
         logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
@@ -218,37 +238,45 @@ class TaskRunner:
         logger.info("Sweep expanded to %d combinations", len(combos))
         return combos
 
-    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> str:
-        """Prepare and submit one job."""
-        # 1. Resolve task plugin
+    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> list[str]:
+        """Prepare and submit one or more jobs (multi-shard aware).
+
+        Returns a list of job IDs — one per :class:`TaskSpec` returned by
+        the task's ``prepare_many`` method.
+        """
+        # 1. Resolve task plugin and expand shards
         task_cls = get_task_class(task_name)
         task = task_cls()
-        task_spec: TaskSpec = task.prepare(params)
+        specs: list[TaskSpec] = task.prepare_many(params)
 
-        # 2. Propagate task-level python_env into metadata for executors to consume
-        if python_env is not None:
-            task_spec.metadata["python_env"] = python_env
+        job_ids: list[str] = []
+        for task_spec in specs:
+            # 2. Propagate task-level python_env into metadata for executors to consume
+            if python_env is not None:
+                task_spec.metadata["python_env"] = python_env
 
-        # 2. Record in DB
-        job_id = self._db.insert(task_name, executor_name, params)
+            # 3. Record in DB
+            job_id = self._db.insert(task_name, executor_name, params)
 
-        # 3. Resolve executor and submit
-        try:
-            executor = resolve_executor(executor_name, self.executor_configs)
-            self._db.update_status(job_id, JobStatus.SUBMITTED)
-            remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
-            log_path = task_spec.metadata.get("log_path")
-            self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
-            logger.info(
-                "Job %s submitted → executor=%s, remote_id=%s",
-                job_id, executor_name, remote_job_id,
-            )
-        except Exception as exc:
-            self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
-            logger.error("Job %s failed to submit: %s", job_id, exc)
-            raise
+            # 4. Resolve executor and submit
+            try:
+                executor = resolve_executor(executor_name, self.executor_configs)
+                self._db.update_status(job_id, JobStatus.SUBMITTED)
+                remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
+                log_path = task_spec.metadata.get("log_path")
+                self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
+                logger.info(
+                    "Job %s submitted → executor=%s, remote_id=%s",
+                    job_id, executor_name, remote_job_id,
+                )
+            except Exception as exc:
+                self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
+                logger.error("Job %s failed to submit: %s", job_id, exc)
+                raise
 
-        return job_id
+            job_ids.append(job_id)
+
+        return job_ids
 
     @staticmethod
     def _map_status(raw: str) -> JobStatus:

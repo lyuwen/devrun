@@ -446,6 +446,88 @@ class TestRunnerIntegration:
                 assert len(job_ids) == 1
 
 
+class TestSubmitSingleMultiShard:
+    """Tests for _submit_single handling of prepare_many / multi-shard."""
+
+    def test_submit_single_calls_prepare_many(self, executors_yaml, temp_dir):
+        """_submit_single should call prepare_many, not prepare."""
+        log_dir = temp_dir / ".devrun" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch("devrun.executors.local._LOG_DIR", log_dir):
+            with patch("devrun.runner.resolve_executor") as mock_resolve:
+                mock_executor = MagicMock()
+                mock_executor.submit_with_retry.return_value = "mock_job_1"
+                mock_resolve.return_value = mock_executor
+
+                with patch("devrun.runner.get_task_class") as mock_get_task:
+                    mock_task = MagicMock()
+                    mock_task.return_value = mock_task
+                    mock_task.prepare_many.return_value = [
+                        TaskSpec(command="echo shard1"),
+                        TaskSpec(command="echo shard2"),
+                    ]
+                    mock_get_task.return_value = mock_task
+
+                    runner = TaskRunner(executors_path=str(executors_yaml), db_path=":memory:")
+                    job_ids = runner._submit_single("test_task", "local", {})
+
+                    mock_task.prepare_many.assert_called_once()
+                    assert len(job_ids) == 2
+
+    def test_submit_single_single_spec_returns_one_id(self, executors_yaml, temp_dir):
+        """When prepare_many returns one spec, _submit_single returns one ID."""
+        log_dir = temp_dir / ".devrun" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        with patch("devrun.executors.local._LOG_DIR", log_dir):
+            with patch("devrun.runner.resolve_executor") as mock_resolve:
+                mock_executor = MagicMock()
+                mock_executor.submit_with_retry.return_value = "mock_job_1"
+                mock_resolve.return_value = mock_executor
+
+                with patch("devrun.runner.get_task_class") as mock_get_task:
+                    mock_task = MagicMock()
+                    mock_task.return_value = mock_task
+                    mock_task.prepare_many.return_value = [
+                        TaskSpec(command="echo single"),
+                    ]
+                    mock_get_task.return_value = mock_task
+
+                    runner = TaskRunner(executors_path=str(executors_yaml), db_path=":memory:")
+                    job_ids = runner._submit_single("test_task", "local", {})
+
+                    assert len(job_ids) == 1
+
+    def test_run_extends_job_ids_from_multi_shard(self, executors_yaml, temp_dir):
+        """run() should extend (not append) job_ids from _submit_single."""
+        log_dir = temp_dir / ".devrun" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a config file that uses our mock task
+        config = {
+            "task": "eval",
+            "executor": "local",
+            "params": {"model": "test"},
+        }
+        config_path = temp_dir / "multi_shard_test.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f)
+
+        with patch("devrun.executors.local._LOG_DIR", log_dir):
+            with patch("devrun.runner.resolve_executor") as mock_resolve:
+                mock_executor = MagicMock()
+                mock_executor.submit_with_retry.return_value = "mock_job"
+                mock_resolve.return_value = mock_executor
+
+                runner = TaskRunner(executors_path=str(executors_yaml), db_path=":memory:")
+                # Mock _submit_single to return multiple IDs
+                with patch.object(runner, "_submit_single", return_value=["id1", "id2"]):
+                    job_ids = runner.run(str(config_path))
+                    # Should have 2 IDs, not a nested list
+                    assert job_ids == ["id1", "id2"]
+
+
 def eval_config_yaml(temp_dir):
     """Helper to create an eval config YAML file."""
     config = {

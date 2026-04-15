@@ -1,0 +1,13 @@
+# configs/swe_bench_agentic/type1.yaml
+# Type 1: Single backend — all tasks run on one Slurm array submission.
+# Extends default.yaml; only override what differs.
+#
+# User/project-level configs must supply: dataset, llm_config (or model_name).
+
+params:
+  max_iterations: 200
+
+  array: "000-499"
+  concurrency_limit: 20
+  oversubscribe: true
+  # partition: "mini"           # Set in user/project config

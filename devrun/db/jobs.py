@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 """
 
+_WORKFLOW_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id   TEXT PRIMARY KEY,
+    workflow_name TEXT NOT NULL,
+    stages_state  TEXT DEFAULT '{}',
+    status        TEXT DEFAULT 'pending',
+    created_at    TEXT NOT NULL,
+    completed_at  TEXT
+);
+"""
+
 
 class JobStore:
     """Thin wrapper around an SQLite database for job records."""
@@ -40,6 +51,7 @@ class JobStore:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_SCHEMA)
+        self._conn.execute(_WORKFLOW_SCHEMA)
         self._conn.commit()
         logger.debug("Job store initialised at %s", self._db_path)
 
@@ -127,6 +139,59 @@ class JobStore:
             completed_at=d.get("completed_at"),
             log_path=d.get("log_path"),
         )
+
+    # ---- workflow mutations -------------------------------------------------
+
+    def insert_workflow(self, workflow_name: str, stages_state: dict[str, Any]) -> str:
+        """Insert a new workflow and return its ``workflow_id``."""
+        workflow_id = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT INTO workflows (workflow_id, workflow_name, stages_state, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (workflow_id, workflow_name, json.dumps(stages_state), "pending", now),
+        )
+        self._conn.commit()
+        logger.info("Inserted workflow %s (name=%s)", workflow_id, workflow_name)
+        return workflow_id
+
+    def update_workflow(
+        self,
+        workflow_id: str,
+        *,
+        status: str | None = None,
+        stages_state: dict[str, Any] | None = None,
+        completed_at: datetime | None = None,
+    ) -> None:
+        """Update workflow status and/or stages_state."""
+        fields: list[str] = []
+        values: list[Any] = []
+        if status is not None:
+            fields.append("status = ?")
+            values.append(status)
+        if stages_state is not None:
+            fields.append("stages_state = ?")
+            values.append(json.dumps(stages_state))
+        if completed_at is not None:
+            fields.append("completed_at = ?")
+            values.append(completed_at.isoformat())
+        if not fields:
+            return
+        values.append(workflow_id)
+        self._conn.execute(f"UPDATE workflows SET {', '.join(fields)} WHERE workflow_id = ?", values)
+        self._conn.commit()
+
+    # ---- workflow queries ---------------------------------------------------
+
+    def get_workflow(self, workflow_id: str) -> dict[str, Any] | None:
+        """Return a workflow record as a dict, or None."""
+        row = self._conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_workflows(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent workflows ordered by creation time."""
+        rows = self._conn.execute("SELECT * FROM workflows ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         self._conn.close()

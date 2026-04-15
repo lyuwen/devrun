@@ -13,17 +13,47 @@ executor: slurm
 #     - export PYTHONUNBUFFERED=1
 
 params:
-  model_name: "example_model" # Derives llm_config to .llm_config/example_model.json
-  run_name: "run1"            # Derives output_dir to logs/run1
+  # model_name: "example_model"   # Set in user/project config
+  # run_name: "run1"              # Derives output_dir to logs/run1
 
-  # llm_config can be an absolute path string to a JSON file, or a full dictionary:
+  # llm_config (required): inline dict or explicit file path string.
+  # No file is auto-derived from model_name — the config must be
+  # self-contained so jobs work on remote machines without pre-placed files.
+  #
+  # Inline dict — string values support {VAR} format strings resolved
+  # from params.env (e.g. {JOB_ID}).  The resolved dict is serialized to
+  # JSON and written to a temp file on the remote host at runtime.
+  #
   # llm_config:
-  #   model: "litellm_proxy/anthropic/claude-opus-4-5-20251101"
-  #   api_key: "YOUR_API_KEY"
+  #   model: "openai/example_model"
+  #   api_key: "${key:my_api_key}"
+  #   # base_url: "https://api.example.com/{JOB_ID}/v1"
+  #   # temperature: 1.0
+  #   # top_p: 0.95
+  #   # litellm_extra_body: ${preset:litellm_extra_body,my_preset}
+  #
+  # Alternatively, pass an explicit file path (must exist on the remote host):
+  # llm_config: "/absolute/path/to/config.json"
+  #
+  # Or use shorthand: set model_name (+ optional api_key, base_url, etc.)
+  # and an inline dict is auto-built.  model_name without a provider prefix
+  # (e.g. "anthropic/", "gemini/") gets "openai/" prepended automatically.
 
-  dataset: ""                 # Provide absolute path to dataset
+  # instances: list of env-var dicts.  When present, the top-level array
+  # range is split evenly among instances and each gets its own Slurm job.
+  # Each dict is merged into params.env for that instance.
+  #
+  # instances:
+  #   - JOB_ID: "if-abc123"
+  #   - JOB_ID: "if-def456"
+  #
+  # Shorthand: job_ids as a comma-separated string (expands to instances):
+  # job_ids: "if-abc123,if-def456,if-ghi789"
+
+  # dataset: ""                   # Set in user/project config
   split: test
   max_iterations: 100
+  run_infer_max_attempts: 5
   select_dir: job_array
   workspace: docker
   task_id_format: "%03d"      # e.g. %05d for 00001
@@ -35,19 +65,24 @@ params:
   array: "000-499"
   concurrency_limit: 10
   oversubscribe: false
-  partition: "agent"
+  # partition: "agent"          # Set in user/project config
   cpus_per_task: 4
   mem: "32G"
   walltime: "24:00:00"
   job_name: "openhands-eval"
-  
-  # Environment variables exported to the Slurm script and Python process
-  # These can be used in llm_config templates via ${oc.env:VAR_NAME}
+
+  # Environment variables exported to the Slurm script and Python process.
+  # When using an inline llm_config dict, these are available as {VAR}
+  # format strings (e.g. {JOB_ID} in base_url).
   env:
     OH_SEND_REASONING_CONTENT: "yes"
-    EVAL_AGENT_SERVER_IMAGE: "harbor.zhejianglab.com/zj021/openhands-eval-agent-server"
+    # EVAL_AGENT_SERVER_IMAGE: "your-registry/openhands-eval-agent-server"
     # TEMPERATURE: "1.0"
     # TOP_P: "0.95"
 
   # Provide setup commands for bash environment before running Python
   env_commands: []
+
+  # git safe.directory entries added before the main command
+  # git_safe_dirs:
+  #   - /path/to/repo

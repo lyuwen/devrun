@@ -499,3 +499,80 @@ class TestJobStoreEdgeCases:
             assert record.params_dict == params
         finally:
             Path(db_path).unlink(missing_ok=True)
+
+
+class TestWorkflowStore:
+    """Tests for workflow CRUD methods in JobStore."""
+
+    def test_insert_workflow(self, job_store):
+        wf_id = job_store.insert_workflow("swe_bench", {"inference": {"status": "pending"}})
+        assert wf_id is not None
+        assert len(wf_id) == 12
+
+    def test_get_workflow(self, job_store):
+        wf_id = job_store.insert_workflow("swe_bench", {"inference": {"status": "pending"}})
+        record = job_store.get_workflow(wf_id)
+        assert record is not None
+        assert record["workflow_name"] == "swe_bench"
+        assert record["status"] == "pending"
+
+    def test_update_workflow_status(self, job_store):
+        wf_id = job_store.insert_workflow("swe_bench", {})
+        job_store.update_workflow(wf_id, status="running")
+        record = job_store.get_workflow(wf_id)
+        assert record["status"] == "running"
+
+    def test_update_workflow_stages_state(self, job_store):
+        wf_id = job_store.insert_workflow("swe_bench", {"s1": {"status": "pending"}})
+        job_store.update_workflow(wf_id, stages_state={"s1": {"status": "completed"}})
+        record = job_store.get_workflow(wf_id)
+        stages = json.loads(record["stages_state"])
+        assert stages["s1"]["status"] == "completed"
+
+    def test_update_workflow_completed_at(self, job_store):
+        wf_id = job_store.insert_workflow("swe_bench", {})
+        completed = datetime.now(timezone.utc)
+        job_store.update_workflow(wf_id, status="completed", completed_at=completed)
+        record = job_store.get_workflow(wf_id)
+        assert record["completed_at"] is not None
+        assert record["status"] == "completed"
+
+    def test_update_workflow_noop(self, job_store):
+        """Calling update with no fields should be a no-op."""
+        wf_id = job_store.insert_workflow("swe_bench", {})
+        job_store.update_workflow(wf_id)  # no fields specified
+        record = job_store.get_workflow(wf_id)
+        assert record["status"] == "pending"
+
+    def test_list_workflows(self, job_store):
+        job_store.insert_workflow("wf1", {})
+        job_store.insert_workflow("wf2", {})
+        records = job_store.list_workflows(limit=10)
+        assert len(records) == 2
+
+    def test_list_workflows_respects_limit(self, job_store):
+        for i in range(5):
+            job_store.insert_workflow(f"wf{i}", {})
+        records = job_store.list_workflows(limit=3)
+        assert len(records) == 3
+
+    def test_list_workflows_ordered_by_created_at(self, job_store):
+        import time
+        wf1 = job_store.insert_workflow("first", {})
+        time.sleep(0.01)
+        wf2 = job_store.insert_workflow("second", {})
+        records = job_store.list_workflows(limit=10)
+        # Most recent first
+        assert records[0]["workflow_id"] == wf2
+        assert records[1]["workflow_id"] == wf1
+
+    def test_get_nonexistent_workflow(self, job_store):
+        assert job_store.get_workflow("nonexistent") is None
+
+    def test_schema_created_on_init(self, job_store):
+        """Verify the workflows table exists after initialization."""
+        cursor = job_store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='workflows'"
+        )
+        table = cursor.fetchone()
+        assert table is not None
