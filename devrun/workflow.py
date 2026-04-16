@@ -189,7 +189,7 @@ class WorkflowRunner:
 
                     if state["status"] in ("completed", "skipped", "skipped_by_user"):
                         continue
-                    if state["status"] == "failed":
+                    if state["status"] in ("failed", "cancelled"):
                         any_failed = True
                         continue
 
@@ -468,10 +468,14 @@ class WorkflowRunner:
                 dotlist[workflow_key] = str(job_params[job_key])
                 mapped_keys.add(job_key)
 
-        # Generic fallback for unmapped params
+        # Generic fallback for unmapped params (skip known-sensitive keys)
+        _SENSITIVE_KEYS = frozenset({"api_key", "token", "secret", "password", "credentials"})
         for key, val in job_params.items():
             wf_key = f"params.{key}"
             if key not in mapped_keys and wf_key not in dotlist and val:
+                if key in _SENSITIVE_KEYS:
+                    logger.debug("Skipping sensitive param %s from generic fallback", key)
+                    continue
                 dotlist[wf_key] = str(val)
 
         logger.info(
