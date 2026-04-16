@@ -28,9 +28,9 @@ All interactions are driven entirely by YAML configuration files.
 * **`devrun/models.py`:** Central Pydantic models. Core entity is `TaskSpec` which holds the final executed `command`, `env`, and `resources` and is returned by `Task.prepare()`.
 * **`devrun/registry.py`:** Custom decorator-based registry (`@register_task`, `@register_executor`) for automated discovery of plugins.
 * **`devrun/runner.py`:** Orchestration logic. Loads YAML configs, expands sweeps via Cartesian product, invokes task preparation, writes to DB, invokes executor plugin `submit()`, and updates DB on error.
-* **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. The `workflow run` command supports OmegaConf overrides as trailing args, `--start-after <stage>` to skip stages, `--from-job <id>` to extract params from an existing job, and `--detach` for background execution.
+* **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. `workflow run` accepts `--start-after <stage>` to skip completed stages, `--from-job <job_id>` to extract params from an existing job, `--detach/-d` for background execution, `--dry-run` for plan preview, and trailing OmegaConf overrides (e.g. `params.model_name=X`). Merge order: YAML base → from-job params → CLI overrides.
 * **`devrun/db/jobs.py`:** Persistent SQLite job store with both `jobs` and `workflows` tables.
-* **`devrun/workflow.py`:** Multi-stage workflow engine with heartbeat-based polling, dependency resolution, timeout handling, dry-run mode, and detached (background) execution. Orchestrates stage transitions through pending → submitted → running → completed/failed/skipped. Supports `--start-after` to skip stages (and transitive deps) with `skipped_by_user` status, `--from-job` to extract workflow params from existing job records, and `<REQUIRED:…>` placeholder validation that fails fast with helpful error messages. The heartbeat loop is shared between foreground (`run()`) and background (`run_detached()` → `_run_existing()`) execution paths.
+* **`devrun/workflow.py`:** Multi-stage workflow engine with heartbeat-based polling, dependency resolution, timeout handling, and dry-run mode. Orchestrates stage transitions through pending → submitted → running → completed/failed/skipped/skipped_by_user. Supports `start_after` to skip stages and their transitive dependencies, `run_detached()` for background execution, `extract_workflow_params()` to pull params from existing jobs, and `<REQUIRED:…>` placeholder validation before submission.
 * **`devrun/utils/templates.py`:** Jinja2 template rendering utility with `shell_quote` filter (`shlex.quote`) and `StrictUndefined` mode. Templates live in `devrun/templates/`.
 * **`devrun/utils/swebench.py`:** Shared SWE-bench utilities including `derive_ds_dir()` for consistent DS_DIR path naming across tasks.
 * **`configs/`:** Example YAML configurations for execution (`executors.yaml`), deployment (`deploy_ray.yaml`), and logic (`eval_math.yaml`, `eval_sweep.yaml`, `inference.yaml`).
@@ -75,6 +75,9 @@ Columns: `workflow_id`, `workflow_name`, `stages_state` (JSON), `status`, `creat
 * **Datetime:** All timestamps use `datetime.now(timezone.utc)` (timezone-aware). `datetime.utcnow()` is deprecated in Python 3.12+ and must not be re-introduced.
 * **Log path propagation pattern:** When an executor knows the log path at submit time, it writes it to `task_spec.metadata["log_path"]`. The runner reads this after `submit_with_retry()` and passes it to `db.update_status(..., log_path=...)`. The runner then retrieves `record.log_path` and passes it as `executor.logs(remote_id, log_path=record.log_path)`. All `logs()` implementations accept the optional `log_path` kwarg.
 * **set_e passthrough:** Tasks that need `set -x` without `set -e` (e.g., retry loops) set `metadata["set_e"] = False`. `SlurmExecutor.submit()` reads this and passes it to `generate_sbatch_script(set_e=...)`. The default is `True` (preserving `set -ex` for all existing tasks).
+* **Workflow OmegaConf overrides:** `workflow run` resolves `${params.X}` interpolations via OmegaConf. Merge order: YAML base → `--from-job` extracted params → CLI trailing overrides. From-job params use `OmegaConf.merge()` (dict-only keys), while CLI overrides use `OmegaConf.update()` per-key to correctly handle list-indexed paths like `stages.0.params.X`. The `_PARAM_MAPPING` dict in `WorkflowRunner.extract_workflow_params()` maps task-level param keys to workflow-level dotlist keys.
+* **Workflow placeholder validation:** Required params use `<REQUIRED: description>` markers. `WorkflowRunner._validate_no_placeholders()` matches `^<REQUIRED(?::\s*.*?)?>$` and raises `ValueError` listing all unfilled fields before any submission.
+* **Workflow detach pattern:** `run_detached()` validates and creates the DB record synchronously, then forks via `subprocess.Popen([sys.executable, "-m", "devrun.workflow", "--state-file", ...])` with `start_new_session=True`. The child process drives the heartbeat loop on the pre-created record.
 
 ## Testing
 
@@ -121,7 +124,7 @@ python -m pytest tests/ -v
 
 ### Test Coverage
 
-- **674 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
+- **697 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
 - Unit tests for all major components (models, registry, database, router, runner, tasks, executors, workflow engine)
 - Integration tests between modules
 - End-to-end workflow tests

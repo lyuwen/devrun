@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -459,7 +458,13 @@ def workflow_run(
 
         if ctx.args:
             console.print(f"[dim]Using overrides: {ctx.args}[/dim]")
-            raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.from_dotlist(ctx.args))
+            for arg in ctx.args:
+                key, _, value = arg.partition("=")
+                if key and _ == "=":
+                    OmegaConf.update(raw_cfg, key, value)
+                else:
+                    console.print(f"[yellow]Warning:[/yellow] ignoring malformed override: {arg}")
+
 
         resolved = OmegaConf.to_container(raw_cfg, resolve=True)
     except typer.Exit:
