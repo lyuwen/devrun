@@ -154,7 +154,7 @@ class TaskRunner:
         except Exception as exc:
             return f"Error fetching logs: {exc}"
 
-    def history(self, limit: int = 50) -> list[dict[str, Any]]:
+    def history(self, limit: int | None = 50) -> list[dict[str, Any]]:
         """Return recent job records, refreshing active ones first."""
         records = self._db.list_all(limit)
         results = []

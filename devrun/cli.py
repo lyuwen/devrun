@@ -247,9 +247,12 @@ def logs(
 @app.command()
 def history(
     limit: int = typer.Option(20, "--limit", "-n", help="Number of recent jobs to show"),
+    all_records: bool = typer.Option(False, "--all", "-a", help="Show all records (no limit)"),
+    no_pager: bool = typer.Option(False, "--no-pager", help="Disable pager for long output"),
 ) -> None:
     """Show recent job history."""
-    records = _runner().history(limit)
+    effective_limit = None if all_records else limit
+    records = _runner().history(effective_limit)
     if not records:
         console.print("[dim]No jobs found.[/dim]")
         return
@@ -275,7 +278,15 @@ def history(
             f"[{status_style}]{rec.get('status', 'unknown')}[/{status_style}]" if status_style else rec.get("status", "unknown"),
             rec.get("created_at", ""),
         )
-    console.print(table)
+
+    # Use pager if output is long and not disabled
+    # Estimate: header(4) + rows + footer(1) lines
+    table_lines = len(records) + 5
+    if not no_pager and table_lines > console.height:
+        with console.pager(styles=True):
+            console.print(table)
+    else:
+        console.print(table)
 
 
 @app.command()

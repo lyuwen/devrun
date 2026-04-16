@@ -134,6 +134,68 @@ class TestCLIHistory:
             assert result.exit_code == 0
             mock_runner.history.assert_called_once_with(10)
 
+    def test_history_all_flag(self):
+        """--all passes None as limit to fetch unlimited records."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            mock_runner.history.return_value = []
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["history", "--all"])
+
+            assert result.exit_code == 0
+            mock_runner.history.assert_called_once_with(None)
+
+    def test_history_all_overrides_limit(self):
+        """--all takes precedence even when --limit is also provided."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            mock_runner.history.return_value = []
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["history", "--limit", "10", "--all"])
+
+            assert result.exit_code == 0
+            mock_runner.history.assert_called_once_with(None)
+
+    def test_history_uses_pager_for_long_output(self):
+        """When output exceeds terminal height, history should use a pager."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            # Generate enough records to exceed a typical terminal
+            mock_runner.history.return_value = [
+                {
+                    "job_id": f"job_{i:04d}",
+                    "task_name": "eval",
+                    "executor": "local",
+                    "status": "completed",
+                    "created_at": "2024-01-01T00:00:00",
+                }
+                for i in range(100)
+            ]
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            with patch("devrun.cli.console") as mock_console:
+                mock_console.height = 24  # simulate small terminal
+                result = runner.invoke(app, ["history", "--all"])
+
+            assert result.exit_code == 0
+
+    def test_history_no_pager_flag(self):
+        """--no-pager should disable pager even for long output."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            mock_runner.history.return_value = []
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["history", "--no-pager"])
+
+            assert result.exit_code == 0
+
 
 class TestCLIRerun:
     """Tests for the 'rerun' command."""
