@@ -1,0 +1,16 @@
+{
+  "jobs": [
+    {
+      "job_id": 200000,
+      "name": "devrun_single_job",
+      "array": {
+        "job_id": 0,
+        "limits": {"max": {"running": {"tasks": 0}}},
+        "task_id": {"set": false, "infinite": false, "number": 0},
+        "task": ""
+      },
+      "state": {"current": ["COMPLETED"], "reason": "None"},
+      "steps": [{"name": "batch"}, {"name": "extern"}]
+    }
+  ]
+}

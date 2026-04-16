@@ -30,6 +30,74 @@ def get_config_dirs() -> list[Path]:
     ]
 
 
+def find_configs(target: str, config_dirs: list[Path] | None = None) -> list[Path]:
+    """Resolve a target name to config file paths across search directories.
+
+    Returns all matching configs in priority order (first = lowest priority).
+    If *target* is a file path that exists on disk, returns ``[path]`` directly.
+    Otherwise parses ``name`` or ``name/variation`` and searches the config
+    directory hierarchy for ``default.yaml`` (all layers) then
+    ``<variation>.yaml`` (all layers).
+    """
+    if config_dirs is None:
+        config_dirs = get_config_dirs()
+
+    p = Path(target)
+    if p.is_file():
+        return [p]
+
+    parts = target.split("/", 1)
+    config_name = parts[0]
+    variation = parts[1] if len(parts) > 1 else "default"
+
+    found: list[Path] = []
+    variations_to_check = ["default"]
+    if variation != "default":
+        variations_to_check.append(variation)
+
+    for v in variations_to_check:
+        filename = f"{v}.yaml"
+        for search_dir in config_dirs:
+            candidate = search_dir / config_name / filename
+            if candidate.is_file():
+                found.append(candidate)
+
+    if not found:
+        raise FileNotFoundError(
+            f"Config for '{target}' not found. Searched for "
+            f"{variations_to_check} under '{config_name}' in: "
+            + ", ".join(str(d) for d in config_dirs)
+        )
+
+    return found
+
+
+def load_merged_config(
+    target: str,
+    overrides: list[str] | None = None,
+    config_dirs: list[Path] | None = None,
+) -> dict:
+    """Load config files for *target*, deep-merge via OmegaConf, apply overrides.
+
+    Returns the resolved config as a plain dict (not model-validated).
+    """
+    from omegaconf import OmegaConf
+    import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
+    import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
+
+    config_paths = find_configs(target, config_dirs)
+    logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
+
+    merged_cfg = OmegaConf.load(config_paths[0])
+    for extra_path in config_paths[1:]:
+        merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.load(extra_path))
+
+    if overrides:
+        merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.from_dotlist(overrides))
+
+    return OmegaConf.to_container(merged_cfg, resolve=True)
+
+
 class TaskRunner:
     """Loads task configs, expands sweeps, prepares tasks, and dispatches to executors."""
 
@@ -53,40 +121,9 @@ class TaskRunner:
         """Resolve a target name to config file paths across all search directories.
 
         Returns all matching configs in priority order (first = lowest priority).
-        This merge strategy cascades configuration definitions: it searches for 
-        'default.yaml' across all layers (repo, user, project) and then overlays
-        '{variation}.yaml' across all layers.
+        Delegates to the module-level :func:`find_configs`.
         """
-        p = Path(target)
-        if p.is_file():
-            return [p]
-
-        # Parse target into task_name and variation
-        parts = target.split("/", 1)
-        task_name = parts[0]
-        variation = parts[1] if len(parts) > 1 else "default"
-
-        found: list[Path] = []
-        variations_to_check = ["default"]
-        if variation != "default":
-            variations_to_check.append(variation)
-
-        # Merge strategy: load all 'default' files first, then variation layer
-        for v in variations_to_check:
-            filename = f"{v}.yaml"
-            for search_dir in self._config_dirs:
-                candidate = search_dir / task_name / filename
-                if candidate.is_file():
-                    found.append(candidate)
-
-        if not found:
-            raise FileNotFoundError(
-                f"Config for '{target}' not found. Searched for "
-                f"{variations_to_check} under '{task_name}' in: "
-                + ", ".join(str(d) for d in self._config_dirs)
-            )
-
-        return found
+        return find_configs(target, self._config_dirs)
 
     def run(self, target: str, overrides: list[str] | None = None, dry_run: bool = False) -> list[str]:
         """Parse a task YAML, apply overrides, expand sweeps, submit all jobs. Returns list of job_ids."""
@@ -139,7 +176,19 @@ class TaskRunner:
             except Exception as exc:
                 logger.warning("Could not refresh status for %s: %s", job_id, exc)
 
-        return record.model_dump(mode="json") if record else {}
+        result = record.model_dump(mode="json") if record else {}
+
+        # Fetch live progress info (e.g. array task counts) — best-effort
+        try:
+            executor = resolve_executor(record.executor, self.executor_configs)
+            remote_id = record.remote_job_id or job_id
+            progress = executor.progress(remote_id)
+            if progress:
+                result["progress"] = progress
+        except Exception as exc:
+            logger.warning("Could not fetch progress for %s: %s", job_id, exc)
+
+        return result
 
     def logs(self, job_id: str) -> str:
         """Retrieve logs for a job."""
@@ -201,23 +250,7 @@ class TaskRunner:
     # ---- internal --------------------------------------------------------
 
     def _load_config(self, target: str, overrides: list[str] | None = None) -> TaskConfig:
-        from omegaconf import OmegaConf
-        import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
-        import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
-
-        config_paths = self._find_configs(target)
-        logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
-
-        # Merge all configs in order (first = base, last = highest priority)
-        merged_cfg = OmegaConf.load(config_paths[0])
-        for extra_path in config_paths[1:]:
-            merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.load(extra_path))
-
-        # CLI overrides have the highest priority
-        if overrides:
-            merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.from_dotlist(overrides))
-
-        raw = OmegaConf.to_container(merged_cfg, resolve=True)
+        raw = load_merged_config(target, overrides, self._config_dirs)
         return TaskConfig(**raw)
 
     @staticmethod

@@ -39,6 +39,14 @@ class BaseExecutor(ABC):
         """Cancel a running job (optional)."""
         raise NotImplementedError(f"cancel() not implemented for {self.__class__.__name__}")
 
+    def progress(self, job_id: str) -> dict[str, Any] | None:
+        """Return live progress information for a job, if supported.
+
+        Executors that track array/batch progress should override this to
+        return a dict with at least ``task_counts`` and ``total_tasks``.
+        """
+        return None
+
     # ---- retry / timeout helpers -----------------------------------------
 
     def submit_with_retry(

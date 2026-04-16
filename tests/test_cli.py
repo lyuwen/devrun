@@ -72,6 +72,32 @@ class TestCLIStatus:
             assert result.exit_code == 1
             assert "not found" in result.stdout.lower() or "error" in result.stdout.lower()
 
+    def test_status_shows_array_progress(self):
+        """Verify status formats array progress from executor."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            mock_runner.status.return_value = {
+                "job_id": "arr_100",
+                "task_name": "swe_bench_agentic",
+                "executor": "slurm",
+                "status": "running",
+                "created_at": "2024-01-01T00:00:00",
+                "progress": {
+                    "task_counts": {"completed": 50, "running": 10, "pending": 5},
+                    "total_tasks": 65,
+                },
+            }
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["status", "arr_100"])
+
+            assert result.exit_code == 0
+            assert "array_progress" in result.stdout
+            assert "50 completed" in result.stdout
+            assert "10 running" in result.stdout
+            assert "total: 65" in result.stdout
+
 
 class TestCLILogs:
     """Tests for the 'logs' command."""
@@ -595,3 +621,71 @@ class TestWorkflowCLINewFeatures:
         assert result.exit_code == 1
         output_lower = result.stdout.lower()
         assert "required" in output_lower or "placeholder" in output_lower or "unfilled" in output_lower
+
+
+class TestNoArgsIsHelp:
+    """Tests that all Typer apps show help when invoked with no arguments."""
+
+    def test_no_args_shows_help(self):
+        """Running 'devrun' with no args exits 0 and output contains 'Usage'."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, [])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+    def test_workflow_no_args_shows_help(self):
+        """Running 'devrun workflow' with no args shows help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+    def test_keys_no_args_shows_help(self):
+        """Running 'devrun keys' with no args shows help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["keys"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+    def test_presets_no_args_shows_help(self):
+        """Running 'devrun presets' with no args shows help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["presets"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+
+class TestWorkflowRunResolution:
+    """Tests for workflow run using hierarchical config resolution via find_configs."""
+
+    def test_workflow_run_by_name(self, tmp_path):
+        """Verify workflow run accepts a name target and resolves it via find_configs."""
+        config = {
+            "workflow": "test_wf",
+            "stages": [
+                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        with patch("devrun.runner.find_configs", return_value=[cfg_path]) as mock_find:
+            with patch("devrun.workflow.WorkflowRunner.run", return_value="wf_123"):
+                runner = get_cli_runner()
+                result = runner.invoke(app, ["workflow", "run", "my_workflow"])
+
+                assert result.exit_code == 0
+                mock_find.assert_called_once_with("my_workflow")
+
+    def test_workflow_run_not_found(self):
+        """When find_configs raises FileNotFoundError, exit code 1 with error."""
+        with patch(
+            "devrun.runner.find_configs",
+            side_effect=FileNotFoundError("Config for 'bogus' not found."),
+        ):
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["workflow", "run", "bogus"])
+
+            assert result.exit_code == 1
+            assert "not found" in result.stdout.lower()

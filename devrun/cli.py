@@ -26,7 +26,8 @@ def complete_target(incomplete: str):
 
 app = typer.Typer(
     name="devrun",
-    help="Modular developer task orchestration system."
+    help="Modular developer task orchestration system.",
+    no_args_is_help=True,
 )
 console = Console()
 
@@ -191,9 +192,12 @@ def list_plugins() -> None:
     table.add_column("Name", style="green")
     table.add_column("Variations", style="dim")
 
-    # Collect variations per task by scanning config directories
+    # Collect variations per task/workflow by scanning config directories
     config_dirs = get_config_dirs()
     task_variations: dict[str, set[str]] = {}
+    workflow_variations: dict[str, set[str]] = {}
+    workflow_dirs: set[str] = set()  # dirs identified as workflows
+
     for d in config_dirs:
         if not d.is_dir():
             continue
@@ -201,7 +205,21 @@ def list_plugins() -> None:
             if child.is_dir():
                 for yaml_file in child.glob("*.yaml"):
                     stem = yaml_file.stem
+                    # Check if this YAML has a top-level 'workflow' key
+                    try:
+                        with open(yaml_file, "r") as fh:
+                            data = yaml.safe_load(fh)
+                        if isinstance(data, dict) and "workflow" in data:
+                            workflow_variations.setdefault(child.name, set()).add(stem)
+                            workflow_dirs.add(child.name)
+                            continue
+                    except Exception:
+                        continue
                     task_variations.setdefault(child.name, set()).add(stem)
+
+    # Remove any dirs classified as workflows from task_variations
+    for wf_name in workflow_dirs:
+        task_variations.pop(wf_name, None)
 
     for name in list_tasks():
         variations = sorted(task_variations.get(name, set()))
@@ -209,6 +227,10 @@ def list_plugins() -> None:
         table.add_row("task", name, variations_str)
     for name in list_executors():
         table.add_row("executor", name, "")
+    for name in sorted(workflow_variations):
+        variations = sorted(workflow_variations[name])
+        variations_str = ", ".join(f"{name}/{v}" for v in variations if v != "default")
+        table.add_row("workflow", name, variations_str)
     console.print(table)
 
 
@@ -223,6 +245,18 @@ def status(
     if "error" in info:
         console.print(f"[red]{info['error']}[/red]")
         raise typer.Exit(code=1)
+
+    # Format array progress into a readable string if present
+    if "progress" in info:
+        progress = info.pop("progress")
+        counts = progress.get("task_counts", {})
+        total = progress.get("total_tasks", 0)
+        display_order = ["completed", "running", "pending", "failed", "cancelled"]
+        parts = [f"{counts[k]} {k}" for k in display_order if counts.get(k)]
+        for key, value in sorted(counts.items()):
+            if key not in display_order and value:
+                parts.append(f"{value} {key}")
+        info["array_progress"] = f"{', '.join(parts)} (total: {total})"
 
     table = Table(title=f"Job {job_id}")
     table.add_column("Field", style="cyan")
@@ -407,7 +441,7 @@ def fetch(
 # ---------------------------------------------------------------------------
 
 
-workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows.")
+workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows.", no_args_is_help=True)
 app.add_typer(workflow_app, name="workflow")
 
 
@@ -417,22 +451,23 @@ app.add_typer(workflow_app, name="workflow")
 )
 def workflow_run(
     ctx: typer.Context,
-    config_path: str = typer.Argument(..., help="Path to workflow YAML config"),
+    target: str = typer.Argument(..., help="Workflow config path, name, or name/variation"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
     start_after: Optional[str] = typer.Option(None, "--start-after", help="Skip this stage and its dependencies, start from the next"),
     from_job: Optional[str] = typer.Option(None, "--from-job", help="Extract workflow params from an existing job"),
     detach: bool = typer.Option(False, "--detach", "-d", help="Run workflow in background, return immediately"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run a multi-stage workflow from a YAML config. Trailing arguments are passed as OmegaConf overrides."""
+    """Run a multi-stage workflow from a YAML config.
+
+    TARGET can be a file path, a workflow name (e.g. swe_bench_workflow),
+    or name/variation. Configs are resolved through the same hierarchical
+    search path as task configs. Trailing arguments are OmegaConf overrides.
+    """
     _setup_logging(verbose)
 
-    config_file = Path(config_path)
-    if not config_file.exists():
-        console.print(f"[red]Error:[/red] Config not found: {config_path}")
-        raise typer.Exit(code=1)
-
     from omegaconf import OmegaConf
+    from devrun.runner import find_configs
     import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
     import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
     from devrun.models import WorkflowConfig
@@ -441,9 +476,18 @@ def workflow_run(
     runner = WorkflowRunner()
     task_name: Optional[str] = None
 
-    # Merge order: YAML base → from-job params → CLI overrides (highest priority)
+    # Merge order: YAML base (hierarchical) → from-job params → CLI overrides (highest priority)
     try:
-        raw_cfg = OmegaConf.load(config_file)
+        config_paths = find_configs(target)
+    except FileNotFoundError:
+        console.print(f"[red]Error:[/red] Config not found for '{target}'.")
+        console.print("Ensure the workflow config exists in one of the config search directories.")
+        raise typer.Exit(code=1)
+
+    try:
+        raw_cfg = OmegaConf.load(config_paths[0])
+        for extra_path in config_paths[1:]:
+            raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.load(extra_path))
 
         if from_job:
             try:
@@ -625,7 +669,7 @@ def workflow_cancel(
 # ---------------------------------------------------------------------------
 
 
-keys_app = typer.Typer(name="keys", help="Manage stored secrets.")
+keys_app = typer.Typer(name="keys", help="Manage stored secrets.", no_args_is_help=True)
 app.add_typer(keys_app, name="keys")
 
 
@@ -697,7 +741,7 @@ def keys_delete(
 # ---------------------------------------------------------------------------
 
 
-presets_app = typer.Typer(name="presets", help="Manage reusable config presets.")
+presets_app = typer.Typer(name="presets", help="Manage reusable config presets.", no_args_is_help=True)
 app.add_typer(presets_app, name="presets")
 
 

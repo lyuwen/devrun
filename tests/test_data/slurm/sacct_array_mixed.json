@@ -1,0 +1,76 @@
+{
+  "jobs": [
+    {
+      "job_id": 100000,
+      "name": "devrun_array_job",
+      "array": {
+        "job_id": 100000,
+        "limits": {"max": {"running": {"tasks": 20}}},
+        "task_id": {"set": false, "infinite": false, "number": 0},
+        "task": "0xFFFF"
+      },
+      "state": {"current": ["PENDING"], "reason": "JobArrayTaskLimit"},
+      "steps": []
+    },
+    {
+      "job_id": 100001,
+      "name": "devrun_array_job",
+      "array": {
+        "job_id": 100000,
+        "limits": {"max": {"running": {"tasks": 0}}},
+        "task_id": {"set": true, "infinite": false, "number": 0},
+        "task": ""
+      },
+      "state": {"current": ["COMPLETED"], "reason": "None"},
+      "steps": [{"name": "batch"}]
+    },
+    {
+      "job_id": 100002,
+      "name": "devrun_array_job",
+      "array": {
+        "job_id": 100000,
+        "limits": {"max": {"running": {"tasks": 0}}},
+        "task_id": {"set": true, "infinite": false, "number": 1},
+        "task": ""
+      },
+      "state": {"current": ["COMPLETED"], "reason": "None"},
+      "steps": [{"name": "batch"}]
+    },
+    {
+      "job_id": 100003,
+      "name": "devrun_array_job",
+      "array": {
+        "job_id": 100000,
+        "limits": {"max": {"running": {"tasks": 0}}},
+        "task_id": {"set": true, "infinite": false, "number": 2},
+        "task": ""
+      },
+      "state": {"current": ["RUNNING"], "reason": "None"},
+      "steps": []
+    },
+    {
+      "job_id": 100004,
+      "name": "devrun_array_job",
+      "array": {
+        "job_id": 100000,
+        "limits": {"max": {"running": {"tasks": 0}}},
+        "task_id": {"set": true, "infinite": false, "number": 3},
+        "task": ""
+      },
+      "state": {"current": ["PENDING"], "reason": "JobArrayTaskLimit"},
+      "steps": []
+    },
+    {
+      "job_id": 100005,
+      "name": "devrun_array_job",
+      "array": {
+        "job_id": 100000,
+        "limits": {"max": {"running": {"tasks": 0}}},
+        "task_id": {"set": true, "infinite": false, "number": 4},
+        "task": ""
+      },
+      "state": {"current": ["FAILED"], "reason": "NonZeroExitCode"},
+      "steps": [{"name": "batch"}]
+    }
+  ]
+}
