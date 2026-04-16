@@ -256,16 +256,6 @@ class WorkflowRunner:
 
                 self._db.update_workflow(wf_id, stages_state=stages_state)
 
-                if all_done:
-                    self._db.update_workflow(
-                        wf_id,
-                        status="completed",
-                        stages_state=stages_state,
-                        completed_at=datetime.now(timezone.utc),
-                    )
-                    logger.info("Workflow %s completed successfully", wf_id)
-                    return wf_id
-
                 if any_failed:
                     self._db.update_workflow(
                         wf_id,
@@ -274,6 +264,16 @@ class WorkflowRunner:
                         completed_at=datetime.now(timezone.utc),
                     )
                     logger.error("Workflow %s failed", wf_id)
+                    return wf_id
+
+                if all_done:
+                    self._db.update_workflow(
+                        wf_id,
+                        status="completed",
+                        stages_state=stages_state,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    logger.info("Workflow %s completed successfully", wf_id)
                     return wf_id
 
                 time.sleep(config.heartbeat_interval)

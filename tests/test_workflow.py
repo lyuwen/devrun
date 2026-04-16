@@ -115,6 +115,39 @@ class TestWorkflowRunner:
         assert stages["s1"]["status"] == "cancelled"
         assert stages["s2"]["status"] == "pending"  # was not running
 
+    def test_cancelled_stage_exits_heartbeat_loop(self, workflow_runner):
+        """A cancelled stage should be treated as terminal so the heartbeat loop exits promptly."""
+        import time
+
+        cfg = WorkflowConfig(
+            workflow="cancel_loop_test",
+            stages=[
+                WorkflowStage(name="s1", task="eval", executor="local"),
+            ],
+            timeout=600,
+            heartbeat_interval=0.001,
+        )
+        # Pre-set stage as cancelled (simulates external cancel() call)
+        stages_state = {
+            "s1": {
+                "status": "cancelled",
+                "remote_job_id": "j1",
+                "db_job_id": "db1",
+                "executor": "local",
+            },
+        }
+        wf_id = workflow_runner._db.insert_workflow("cancel_loop_test", stages_state)
+        workflow_runner._db.update_workflow(wf_id, status="running")
+
+        start = time.monotonic()
+        result = workflow_runner._heartbeat_loop(wf_id, cfg, stages_state)
+        elapsed = time.monotonic() - start
+
+        record = workflow_runner._db.get_workflow(result)
+        assert record["status"] == "failed"
+        # Must exit promptly — not spin until the 600s timeout
+        assert elapsed < 5.0
+
     def test_cancel_nonexistent_raises(self, workflow_runner):
         with pytest.raises(ValueError, match="not found"):
             workflow_runner.cancel("nonexistent")
