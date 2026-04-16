@@ -271,7 +271,7 @@ class TestWorkflowSimulationStartAfter:
                 stages = json.loads(record["stages_state"])
 
                 # Inference skipped, collect + evaluate completed
-                assert stages["inference"]["status"] == "skipped"
+                assert stages["inference"]["status"] == "skipped_by_user"
                 assert stages["collect"]["status"] == "completed"
                 assert stages["evaluate"]["status"] == "completed"
 
@@ -280,12 +280,16 @@ class TestWorkflowSimulationStartAfter:
                 assert submitted == ["collect", "evaluate"]
 
     def test_from_job_populates_downstream_stages(self, tmp_path):
-        """Params from a source job should flow correctly to collect + eval stages.
+        """Params extracted from a job should propagate correctly via OmegaConf merge.
 
-        When using from_job with a swe_bench_agentic job, the extracted params
-        (model_name, dataset, split, output_dir) should propagate to the
-        collect and evaluate stages, maintaining DS_DIR consistency.
+        This simulates the full CLI flow: extract_workflow_params returns a
+        dotlist dict, which is merged into the raw OmegaConf config before
+        resolution.  The merged config should have REQUIRED placeholders
+        replaced with actual values from the source job, maintaining DS_DIR
+        consistency across stages.
         """
+        import yaml as _yaml
+        from omegaconf import OmegaConf
         from devrun.workflow import WorkflowRunner
 
         runner = WorkflowRunner(db_path=tmp_path / "from_job_sim.db")
@@ -307,65 +311,81 @@ class TestWorkflowSimulationStartAfter:
             parameters=job_params,
         )
 
-        # Template config with placeholders
-        template_config = WorkflowConfig(
-            workflow="swe_bench",
-            stages=[
-                WorkflowStage(
-                    name="inference",
-                    task="swe_bench_agentic",
-                    executor="slurm",
-                    params={
-                        "model_name": "<REQUIRED:model name>",
-                        "dataset": "/mnt/data/SWE-bench_Verified",
-                        "split": "test",
-                        "output_dir": "<REQUIRED:output directory>",
-                        "run_name": "<REQUIRED:run name>",
+        # Template YAML config with OmegaConf interpolation and REQUIRED placeholders
+        template_yaml = {
+            "workflow": "swe_bench",
+            "params": {
+                "model_name": "<REQUIRED:model name>",
+                "dataset": "/mnt/data/SWE-bench_Verified",
+                "split": "test",
+                "output_dir": "<REQUIRED:output directory>",
+                "run_name": "<REQUIRED:run name>",
+            },
+            "stages": [
+                {
+                    "name": "inference",
+                    "task": "swe_bench_agentic",
+                    "executor": "slurm",
+                    "params": {
+                        "model_name": "${params.model_name}",
+                        "dataset": "${params.dataset}",
+                        "split": "${params.split}",
+                        "output_dir": "${params.output_dir}",
+                        "run_name": "${params.run_name}",
                     },
-                ),
-                WorkflowStage(
-                    name="collect",
-                    task="swe_bench_collect",
-                    executor="local",
-                    depends_on="inference",
-                    params={
-                        "output_dir": "<REQUIRED:output directory>",
-                        "dataset": "/mnt/data/SWE-bench_Verified",
-                        "split": "test",
+                },
+                {
+                    "name": "collect",
+                    "task": "swe_bench_collect",
+                    "executor": "local",
+                    "depends_on": "inference",
+                    "params": {
+                        "output_dir": "${params.output_dir}",
+                        "dataset": "${params.dataset}",
+                        "split": "${params.split}",
                     },
-                ),
-                WorkflowStage(
-                    name="evaluate",
-                    task="swe_bench_eval",
-                    executor="local",
-                    depends_on="collect",
-                    params={
-                        "dataset_name": "/mnt/data/SWE-bench_Verified",
-                        "predictions_path": "<REQUIRED:predictions path>",
+                },
+                {
+                    "name": "evaluate",
+                    "task": "swe_bench_eval",
+                    "executor": "local",
+                    "depends_on": "collect",
+                    "params": {
+                        "dataset_name": "${params.dataset}",
                     },
-                ),
+                },
             ],
-            heartbeat_interval=0.001,
-        )
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "workflow.yaml"
+        cfg_path.write_text(_yaml.dump(template_yaml))
 
-        # Extract config from the source job
-        populated = runner.from_job(job_id, template_config)
+        # Simulate CLI flow: extract params → merge → resolve
+        dotlist, task_name = runner.extract_workflow_params(job_id)
+        assert task_name == "swe_bench_agentic"
+        assert dotlist["params.model_name"] == "gpt-4o"
 
-        # Verify params were populated correctly
-        inf_params = populated.stages[0].params
+        raw_cfg = OmegaConf.load(str(cfg_path))
+        job_overrides = [f"{k}={v}" for k, v in dotlist.items()]
+        raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.from_dotlist(job_overrides))
+        resolved = OmegaConf.to_container(raw_cfg, resolve=True)
+        cfg = WorkflowConfig(**resolved)
+
+        # Auto-detect stage
+        detected = runner.detect_stage_for_task(task_name, cfg)
+        assert detected == "inference"
+
+        # Verify params were populated correctly in all stages
+        inf_params = cfg.stages[0].params
         assert inf_params["model_name"] == "gpt-4o"
         assert inf_params["output_dir"] == "logs/gpt4o_run"
         assert inf_params["run_name"] == "gpt4o_run"
 
-        # Verify downstream stages got consistent params
-        col_params = populated.stages[1].params
+        col_params = cfg.stages[1].params
         assert col_params["output_dir"] == "logs/gpt4o_run"
+        assert col_params["dataset"] == "/mnt/data/SWE-bench_Verified"
 
         # DS_DIR should be consistent between inference and collect
-        inf_ds_dir = derive_ds_dir(
-            inf_params["dataset"], inf_params["split"]
-        )
-        col_ds_dir = derive_ds_dir(
-            col_params["dataset"], col_params["split"]
-        )
+        inf_ds_dir = derive_ds_dir(inf_params["dataset"], inf_params["split"])
+        col_ds_dir = derive_ds_dir(col_params["dataset"], col_params["split"])
         assert inf_ds_dir == col_ds_dir

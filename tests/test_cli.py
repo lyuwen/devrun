@@ -484,19 +484,15 @@ class TestWorkflowCLINewFeatures:
         cfg_path = tmp_path / "wf.yaml"
         cfg_path.write_text(yaml.dump(config))
 
-        with patch("devrun.cli.WorkflowRunner") as mock_wf_cls:
-            mock_runner = MagicMock()
-            mock_runner.run.return_value = "wf_123"
-            mock_wf_cls.return_value = mock_runner
-
-            runner = get_cli_runner()
-            result = runner.invoke(app, [
-                "workflow", "run", str(cfg_path),
-                "stages.0.params.model=overridden-model",
-            ])
-            # Either the CLI parsed overrides or the command ran
-            # The important thing is it didn't crash on trailing args
-            assert result.exit_code in [0, 1]
+        # Use --dry-run to verify overrides are applied without needing to mock execution
+        runner = get_cli_runner()
+        result = runner.invoke(app, [
+            "workflow", "run", str(cfg_path), "--dry-run",
+            "stages.0.params.model=overridden-model",
+        ])
+        assert result.exit_code == 0
+        # The override should appear in the dry-run output
+        assert "overridden-model" in result.stdout
 
     def test_workflow_run_start_after_flag(self, tmp_path):
         """--start-after flag should be parsed and forwarded to WorkflowRunner."""
@@ -504,92 +500,74 @@ class TestWorkflowCLINewFeatures:
             "workflow": "start_after_test",
             "stages": [
                 {"name": "inference", "task": "eval", "executor": "local", "params": {"model": "x"}},
-                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference"},
-                {"name": "evaluate", "task": "eval", "executor": "local", "depends_on": "collect"},
+                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference", "params": {"model": "x"}},
+                {"name": "evaluate", "task": "eval", "executor": "local", "depends_on": "collect", "params": {"model": "x"}},
             ],
             "heartbeat_interval": 0.001,
         }
         cfg_path = tmp_path / "wf.yaml"
         cfg_path.write_text(yaml.dump(config))
 
-        with patch("devrun.cli.WorkflowRunner") as mock_wf_cls:
-            mock_runner = MagicMock()
-            mock_runner.run.return_value = "wf_456"
-            mock_wf_cls.return_value = mock_runner
-
-            runner = get_cli_runner()
-            result = runner.invoke(app, [
-                "workflow", "run", str(cfg_path),
-                "--start-after", "inference",
-            ])
-            # The flag should be parsed without error
-            assert result.exit_code in [0, 1]
-            # If the mock was called, verify start_after was forwarded
-            if mock_runner.run.called:
-                call_kwargs = mock_runner.run.call_args
-                assert call_kwargs.kwargs.get("start_after") == "inference" or \
-                    (len(call_kwargs.args) > 1 and "inference" in str(call_kwargs))
+        # Use --dry-run with --start-after to verify the flag is parsed and produces skip markers
+        runner = get_cli_runner()
+        result = runner.invoke(app, [
+            "workflow", "run", str(cfg_path),
+            "--start-after", "inference", "--dry-run",
+        ])
+        assert result.exit_code == 0
+        # Should show inference as skipped
+        assert "SKIPPED" in result.stdout or "skipped" in result.stdout.lower()
 
     def test_workflow_run_from_job_flag(self, tmp_path):
-        """--from-job flag should be parsed and forwarded to WorkflowRunner."""
+        """--from-job flag should be parsed and extract_workflow_params called."""
         config = {
             "workflow": "from_job_test",
             "stages": [
-                {"name": "inference", "task": "eval", "executor": "local"},
-                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference"},
+                {"name": "inference", "task": "eval", "executor": "local", "params": {"model": "x"}},
+                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference", "params": {"model": "x"}},
             ],
             "heartbeat_interval": 0.001,
         }
         cfg_path = tmp_path / "wf.yaml"
         cfg_path.write_text(yaml.dump(config))
 
-        with patch("devrun.cli.WorkflowRunner") as mock_wf_cls:
-            mock_runner = MagicMock()
-            mock_runner.from_job.return_value = MagicMock()
-            mock_runner.run.return_value = "wf_789"
-            mock_wf_cls.return_value = mock_runner
-
-            runner = get_cli_runner()
-            result = runner.invoke(app, [
-                "workflow", "run", str(cfg_path),
-                "--from-job", "job_abc123",
-            ])
-            # The flag should be parsed without error
-            assert result.exit_code in [0, 1]
-            # If the mock was called, verify from_job was used
-            if mock_runner.from_job.called:
-                call_args = mock_runner.from_job.call_args
-                assert "job_abc123" in str(call_args)
+        with patch("devrun.workflow.WorkflowRunner.extract_workflow_params") as mock_extract:
+            mock_extract.return_value = (
+                {"params.model_name": "from-job-model"},
+                "swe_bench_agentic",
+            )
+            with patch("devrun.workflow.WorkflowRunner.detect_stage_for_task", return_value=None):
+                with patch("devrun.workflow.WorkflowRunner.run", return_value="wf_789"):
+                    runner = get_cli_runner()
+                    result = runner.invoke(app, [
+                        "workflow", "run", str(cfg_path),
+                        "--from-job", "job_abc123",
+                    ])
+                    # The flag should be parsed and extract_workflow_params called
+                    assert result.exit_code in [0, 1]
+                    mock_extract.assert_called_once_with("job_abc123")
 
     def test_workflow_run_detach_flag(self, tmp_path):
-        """--detach flag should be parsed, and command should return immediately."""
+        """--detach flag should call run_detached instead of run."""
         config = {
             "workflow": "detach_test",
             "stages": [
-                {"name": "s1", "task": "eval", "executor": "local"},
+                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
             ],
             "heartbeat_interval": 0.001,
         }
         cfg_path = tmp_path / "wf.yaml"
         cfg_path.write_text(yaml.dump(config))
 
-        with patch("devrun.cli.WorkflowRunner") as mock_wf_cls:
-            mock_runner = MagicMock()
-            mock_runner.run.return_value = "wf_detach_001"
-            mock_wf_cls.return_value = mock_runner
-
+        with patch("devrun.workflow.WorkflowRunner.run_detached", return_value="wf_detach_001") as mock_detach:
             runner = get_cli_runner()
             result = runner.invoke(app, [
                 "workflow", "run", str(cfg_path),
                 "--detach",
             ])
-            # Should not error on the flag
-            assert result.exit_code in [0, 1]
-            # If run was called, detach should have been forwarded
-            if mock_runner.run.called:
-                call_kwargs = mock_runner.run.call_args
-                assert call_kwargs.kwargs.get("detach") is True or \
-                    call_kwargs.kwargs.get("detached") is True
+            assert result.exit_code == 0
+            mock_detach.assert_called_once()
+            assert "background" in result.stdout.lower() or "wf_detach_001" in result.stdout
 
     def test_workflow_run_placeholder_error(self, tmp_path):
         """Workflow with unfilled <REQUIRED:...> placeholders should show helpful error."""

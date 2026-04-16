@@ -294,14 +294,14 @@ class TestWorkflowStartAfter:
         )
 
     def test_start_after_skips_named_stage(self, workflow_runner, three_stage_config):
-        """When start_after='inference', the inference stage is pre-marked as skipped."""
+        """When start_after='inference', the inference stage is pre-marked as skipped_by_user."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
             mock_submit.return_value = "mock_job_id"
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(three_stage_config, start_after="inference")
                 record = workflow_runner._db.get_workflow(wf_id)
                 stages = json.loads(record["stages_state"])
-                assert stages["inference"]["status"] == "skipped"
+                assert stages["inference"]["status"] == "skipped_by_user"
                 # collect and evaluate should have been submitted
                 submitted_names = [c.args[0] for c in mock_submit.call_args_list]
                 assert "inference" not in submitted_names
@@ -326,9 +326,9 @@ class TestWorkflowStartAfter:
                 wf_id = workflow_runner.run(cfg, start_after="inference")
                 record = workflow_runner._db.get_workflow(wf_id)
                 stages = json.loads(record["stages_state"])
-                # Both prep and inference should be skipped
-                assert stages["prep"]["status"] == "skipped"
-                assert stages["inference"]["status"] == "skipped"
+                # Both prep and inference should be skipped_by_user
+                assert stages["prep"]["status"] == "skipped_by_user"
+                assert stages["inference"]["status"] == "skipped_by_user"
                 # collect and evaluate should run
                 submitted_names = [c.args[0] for c in mock_submit.call_args_list]
                 assert "collect" in submitted_names
@@ -339,11 +339,15 @@ class TestWorkflowStartAfter:
         with pytest.raises(ValueError, match="not found|does not exist|unknown stage"):
             workflow_runner.run(three_stage_config, start_after="nonexistent_stage")
 
-    def test_start_after_last_stage_warns(self, workflow_runner, three_stage_config):
-        """start_after the last stage means nothing to run — should warn or raise."""
-        # Skipping the last stage means every stage is skipped
-        with pytest.raises((ValueError, RuntimeError)):
-            workflow_runner.run(three_stage_config, start_after="evaluate")
+    def test_start_after_last_stage_completes_immediately(self, workflow_runner, three_stage_config):
+        """start_after the last stage means everything is skipped — workflow completes with all skipped."""
+        wf_id = workflow_runner.run(three_stage_config, start_after="evaluate")
+        record = workflow_runner._db.get_workflow(wf_id)
+        stages = json.loads(record["stages_state"])
+        # All stages should be skipped_by_user
+        for name in ("inference", "collect", "evaluate"):
+            assert stages[name]["status"] == "skipped_by_user"
+        assert record["status"] == "completed"
 
     def test_start_after_dry_run_shows_skip_info(self, workflow_runner, three_stage_config):
         """Dry-run with start_after should indicate which stages are skipped."""
@@ -364,7 +368,7 @@ class TestWorkflowStartAfter:
 
 
 class TestWorkflowFromJob:
-    """Tests for creating workflow runs from existing job records."""
+    """Tests for extract_workflow_params and detect_stage_for_task."""
 
     @pytest.fixture
     def swe_bench_workflow_config(self):
@@ -402,9 +406,8 @@ class TestWorkflowFromJob:
             heartbeat_interval=0.001,
         )
 
-    def test_from_job_extracts_params(self, workflow_runner, swe_bench_workflow_config):
-        """from_job should extract parameters from a stored job record."""
-        # Insert a fake job with known params
+    def test_extract_workflow_params_extracts_params(self, workflow_runner):
+        """extract_workflow_params should return a dotlist dict from a stored job record."""
         job_params = {
             "model_name": "test-model",
             "dataset": "/data/SWE-bench_Verified",
@@ -418,67 +421,41 @@ class TestWorkflowFromJob:
             parameters=job_params,
         )
 
-        extracted = workflow_runner.from_job(job_id, swe_bench_workflow_config)
-        assert isinstance(extracted, WorkflowConfig)
-        # The extracted config should have the job's params populated into matching stage params
-        inf_params = extracted.stages[0].params
-        assert inf_params["model_name"] == "test-model"
-        assert inf_params["output_dir"] == "logs/test_run"
-        assert inf_params["run_name"] == "test_run"
+        dotlist, task_name = workflow_runner.extract_workflow_params(job_id)
+        assert task_name == "swe_bench_agentic"
+        assert dotlist["params.model_name"] == "test-model"
+        assert dotlist["params.output_dir"] == "logs/test_run"
+        assert dotlist["params.run_name"] == "test_run"
+        assert dotlist["params.dataset"] == "/data/SWE-bench_Verified"
 
-    def test_from_job_nonexistent_raises(self, workflow_runner, swe_bench_workflow_config):
-        """from_job with an invalid job_id should raise ValueError."""
-        with pytest.raises(ValueError, match="not found|does not exist"):
-            workflow_runner.from_job("nonexistent_job_id", swe_bench_workflow_config)
+    def test_extract_workflow_params_nonexistent_raises(self, workflow_runner):
+        """extract_workflow_params with an invalid job_id should raise ValueError."""
+        with pytest.raises(ValueError, match="not found"):
+            workflow_runner.extract_workflow_params("nonexistent_job_id")
 
-    def test_from_job_params_merged_with_overrides(self, workflow_runner, swe_bench_workflow_config):
-        """CLI overrides should take precedence over params extracted from job."""
-        job_params = {
-            "model_name": "original-model",
-            "dataset": "/data/SWE-bench_Verified",
-            "split": "test",
-            "output_dir": "logs/original_run",
-            "run_name": "original_run",
-        }
-        job_id = workflow_runner._db.insert(
-            task_name="swe_bench_agentic",
-            executor="slurm",
-            parameters=job_params,
-        )
-
-        # Override the model_name
-        overrides = {"model_name": "overridden-model"}
-        extracted = workflow_runner.from_job(job_id, swe_bench_workflow_config, overrides=overrides)
-        inf_params = extracted.stages[0].params
-        assert inf_params["model_name"] == "overridden-model"
-        # Non-overridden params should come from the job
-        assert inf_params["output_dir"] == "logs/original_run"
-
-    def test_from_job_auto_detects_stage(self, workflow_runner, swe_bench_workflow_config):
-        """When the source job is swe_bench_agentic, inference stage should be auto-skipped."""
+    def test_extract_workflow_params_omits_empty_values(self, workflow_runner):
+        """extract_workflow_params should skip params with empty/falsy values."""
         job_params = {
             "model_name": "test-model",
-            "dataset": "/data/SWE-bench_Verified",
-            "split": "test",
-            "output_dir": "logs/test_run",
-            "run_name": "test_run",
+            "dataset": "",
+            "output_dir": "logs/run",
         }
         job_id = workflow_runner._db.insert(
             task_name="swe_bench_agentic",
             executor="slurm",
             parameters=job_params,
         )
+        dotlist, _ = workflow_runner.extract_workflow_params(job_id)
+        assert "params.model_name" in dotlist
+        assert "params.output_dir" in dotlist
+        assert "params.dataset" not in dotlist  # empty string skipped
 
-        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
-            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
-                extracted = workflow_runner.from_job(job_id, swe_bench_workflow_config)
-                wf_id = workflow_runner.run(extracted, start_after="inference")
-                record = workflow_runner._db.get_workflow(wf_id)
-                stages = json.loads(record["stages_state"])
-                assert stages["inference"]["status"] == "skipped"
-                submitted_names = [c.args[0] for c in mock_submit.call_args_list]
-                assert "inference" not in submitted_names
+    def test_detect_stage_for_task(self, workflow_runner, swe_bench_workflow_config):
+        """detect_stage_for_task maps task type to stage name."""
+        assert workflow_runner.detect_stage_for_task("swe_bench_agentic", swe_bench_workflow_config) == "inference"
+        assert workflow_runner.detect_stage_for_task("swe_bench_collect", swe_bench_workflow_config) == "collect"
+        assert workflow_runner.detect_stage_for_task("swe_bench_eval", swe_bench_workflow_config) == "evaluate"
+        assert workflow_runner.detect_stage_for_task("unknown_task", swe_bench_workflow_config) is None
 
 
 # ============================================================================
@@ -490,47 +467,50 @@ class TestWorkflowDetached:
     """Tests for detached (background) workflow execution."""
 
     def test_detached_creates_db_record(self, workflow_runner):
-        """Detach mode should write a workflow record to the DB before returning."""
+        """run_detached should write a workflow record to the DB before returning."""
         cfg = WorkflowConfig(
             workflow="detach_test",
             stages=[
-                WorkflowStage(name="slow_stage", task="eval", executor="local"),
+                WorkflowStage(name="slow_stage", task="eval", executor="local",
+                              params={"model": "x"}),
             ],
-            heartbeat_interval=1.0,  # long interval - won't complete during test
+            heartbeat_interval=1.0,
         )
-        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
-            with patch.object(workflow_runner, "_poll_job_status", return_value="running"):
-                wf_id = workflow_runner.run(cfg, detach=True)
-                # Should return immediately with a workflow_id
-                assert isinstance(wf_id, str)
-                assert len(wf_id) > 0
-                # DB record should exist
-                record = workflow_runner._db.get_workflow(wf_id)
-                assert record is not None
-                assert record["workflow_name"] == "detach_test"
+        with patch("devrun.workflow.subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock()
+            wf_id = workflow_runner.run_detached(cfg)
+            # Should return immediately with a workflow_id
+            assert isinstance(wf_id, str)
+            assert len(wf_id) > 0
+            # DB record should exist
+            record = workflow_runner._db.get_workflow(wf_id)
+            assert record is not None
+            assert record["workflow_name"] == "detach_test"
 
-    def test_detached_returns_workflow_id(self, workflow_runner):
-        """Detach mode should return the workflow ID immediately without waiting for completion."""
+    def test_detached_returns_workflow_id_immediately(self, workflow_runner):
+        """run_detached should return the workflow ID immediately without blocking."""
         cfg = WorkflowConfig(
             workflow="detach_return_test",
             stages=[
-                WorkflowStage(name="s1", task="eval", executor="local"),
-                WorkflowStage(name="s2", task="eval", executor="local", depends_on="s1"),
+                WorkflowStage(name="s1", task="eval", executor="local",
+                              params={"model": "x"}),
+                WorkflowStage(name="s2", task="eval", executor="local",
+                              depends_on="s1", params={"model": "y"}),
             ],
-            heartbeat_interval=10.0,  # very long to ensure it doesn't complete
+            heartbeat_interval=10.0,
         )
         import time
 
-        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
-            with patch.object(workflow_runner, "_poll_job_status", return_value="running"):
-                start = time.monotonic()
-                wf_id = workflow_runner.run(cfg, detach=True)
-                elapsed = time.monotonic() - start
-                # Should return much faster than the heartbeat interval
-                assert elapsed < 5.0
-                assert isinstance(wf_id, str)
+        with patch("devrun.workflow.subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock()
+            start = time.monotonic()
+            wf_id = workflow_runner.run_detached(cfg)
+            elapsed = time.monotonic() - start
+            # Should return much faster than the heartbeat interval
+            assert elapsed < 5.0
+            assert isinstance(wf_id, str)
+            # Popen should have been called to spawn background process
+            mock_popen.assert_called_once()
 
 
 # ============================================================================
