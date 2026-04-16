@@ -461,10 +461,12 @@ def workflow_run(
             for arg in ctx.args:
                 key, _, value = arg.partition("=")
                 if key and _ == "=":
-                    OmegaConf.update(raw_cfg, key, value)
+                    # Parse value type (e.g. "30" → int, "true" → bool)
+                    # so numeric/boolean overrides aren't stored as strings.
+                    parsed = yaml.safe_load(value)
+                    OmegaConf.update(raw_cfg, key, parsed)
                 else:
                     console.print(f"[yellow]Warning:[/yellow] ignoring malformed override: {arg}")
-
 
         resolved = OmegaConf.to_container(raw_cfg, resolve=True)
     except typer.Exit:

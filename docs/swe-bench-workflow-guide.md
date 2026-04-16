@@ -227,7 +227,7 @@ When combined with `--start-after`, skipped stages are clearly tagged:
 Workflow: swe_bench
 Timeout: 172800s (48h)
 
-Stage 1: inference [SKIPPED -- start-after]
+Stage 1: inference [SKIPPED — start-after]
   Task: swe_bench_agentic
   Executor: slurm
   Depends on: (none)

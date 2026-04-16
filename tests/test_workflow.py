@@ -38,7 +38,7 @@ class TestWorkflowRunner:
     def test_dependency_ordering(self, workflow_runner, simple_config):
         """step2 depends on step1, so step1 must run first."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 workflow_runner.run(simple_config)
                 calls = [c.args[0] for c in mock_submit.call_args_list]
@@ -48,7 +48,7 @@ class TestWorkflowRunner:
     def test_failure_stops_workflow(self, workflow_runner, simple_config):
         """If step1 fails, step2 should never be submitted."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="failed"):
                 wf_id = workflow_runner.run(simple_config)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -57,7 +57,7 @@ class TestWorkflowRunner:
 
     def test_all_stages_complete(self, workflow_runner, simple_config):
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(simple_config)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -71,7 +71,7 @@ class TestWorkflowRunner:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="running"):
                 wf_id = workflow_runner.run(cfg)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -93,7 +93,7 @@ class TestWorkflowRunner:
     def test_skipped_stage_when_dep_fails(self, workflow_runner, simple_config):
         """step2 should be skipped when step1 fails."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="failed"):
                 wf_id = workflow_runner.run(simple_config)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -104,8 +104,8 @@ class TestWorkflowRunner:
 
     def test_cancel_workflow(self, workflow_runner):
         wf_id = workflow_runner._db.insert_workflow("test", {
-            "s1": {"status": "running", "job_id": "j1"},
-            "s2": {"status": "pending", "job_id": None},
+            "s1": {"status": "running", "remote_job_id": "j1"},
+            "s2": {"status": "pending", "remote_job_id": None},
         })
         workflow_runner._db.update_workflow(wf_id, status="running")
         workflow_runner.cancel(wf_id)
@@ -121,8 +121,8 @@ class TestWorkflowRunner:
 
     def test_logs_all_stages(self, workflow_runner):
         wf_id = workflow_runner._db.insert_workflow("test", {
-            "s1": {"status": "completed", "job_id": "j1"},
-            "s2": {"status": "running", "job_id": "j2"},
+            "s1": {"status": "completed", "remote_job_id": "j1"},
+            "s2": {"status": "running", "remote_job_id": "j2"},
         })
         result = workflow_runner.logs(wf_id)
         assert "s1" in result
@@ -132,7 +132,7 @@ class TestWorkflowRunner:
 
     def test_logs_specific_stage(self, workflow_runner):
         wf_id = workflow_runner._db.insert_workflow("test", {
-            "s1": {"status": "completed", "job_id": "j1"},
+            "s1": {"status": "completed", "remote_job_id": "j1"},
         })
         result = workflow_runner.logs(wf_id, stage="s1")
         assert "j1" in result
@@ -171,7 +171,7 @@ class TestWorkflowRunnerParallelStages:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(cfg)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -191,7 +191,7 @@ class TestWorkflowRunnerParallelStages:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(cfg)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -296,7 +296,7 @@ class TestWorkflowStartAfter:
     def test_start_after_skips_named_stage(self, workflow_runner, three_stage_config):
         """When start_after='inference', the inference stage is pre-marked as skipped_by_user."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(three_stage_config, start_after="inference")
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -321,7 +321,7 @@ class TestWorkflowStartAfter:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(cfg, start_after="inference")
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -549,7 +549,7 @@ class TestPlaceholderValidation:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 # Should not raise
                 wf_id = workflow_runner.run(cfg)
@@ -606,7 +606,7 @@ class TestEnhancedLogs:
     def test_enhanced_logs_delegates_to_executor(self, workflow_runner):
         """Logs method should attempt to delegate to executor.logs() for actual content."""
         wf_id = workflow_runner._db.insert_workflow("test", {
-            "s1": {"status": "completed", "job_id": "j1", "executor": "local"},
+            "s1": {"status": "completed", "remote_job_id": "j1", "executor": "local"},
         })
         # Insert a corresponding job record so executor lookup works
         workflow_runner._db.insert(task_name="eval", executor="local")

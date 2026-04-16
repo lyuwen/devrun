@@ -261,7 +261,7 @@ class TestWorkflowSimulationStartAfter:
         runner = WorkflowRunner(db_path=tmp_path / "sim_test.db")
 
         with patch.object(runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = "mock_job_id"
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
             with patch.object(runner, "_poll_job_status", return_value="completed"):
                 wf_id = runner.run(
                     swe_bench_three_stage_config, start_after="inference"
