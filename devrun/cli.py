@@ -412,13 +412,20 @@ workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows."
 app.add_typer(workflow_app, name="workflow")
 
 
-@workflow_app.command("run")
+@workflow_app.command(
+    "run",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
 def workflow_run(
+    ctx: typer.Context,
     config_path: str = typer.Argument(..., help="Path to workflow YAML config"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
+    start_after: Optional[str] = typer.Option(None, "--start-after", help="Skip this stage and its dependencies, start from the next"),
+    from_job: Optional[str] = typer.Option(None, "--from-job", help="Extract workflow params from an existing job"),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run workflow in background, return immediately"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Run a multi-stage workflow from a YAML config."""
+    """Run a multi-stage workflow from a YAML config. Trailing arguments are passed as OmegaConf overrides."""
     _setup_logging(verbose)
 
     config_file = Path(config_path)
@@ -426,27 +433,77 @@ def workflow_run(
         console.print(f"[red]Error:[/red] Config not found: {config_path}")
         raise typer.Exit(code=1)
 
+    from omegaconf import OmegaConf
+    import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
+    import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
     from devrun.models import WorkflowConfig
+    from devrun.workflow import WorkflowRunner
 
-    with open(config_file) as fh:
-        raw = yaml.safe_load(fh)
+    runner = WorkflowRunner()
+    task_name: Optional[str] = None
+
+    # Merge order: YAML base → from-job params → CLI overrides (highest priority)
+    try:
+        raw_cfg = OmegaConf.load(config_file)
+
+        if from_job:
+            try:
+                job_params, task_name = runner.extract_workflow_params(from_job)
+            except ValueError as exc:
+                console.print(f"[red]Error:[/red] {exc}")
+                raise typer.Exit(code=1)
+            if job_params:
+                console.print(f"[dim]From job {from_job}: {list(job_params.keys())}[/dim]")
+                job_overrides = [f"{k}={v}" for k, v in job_params.items()]
+                raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.from_dotlist(job_overrides))
+
+        if ctx.args:
+            console.print(f"[dim]Using overrides: {ctx.args}[/dim]")
+            raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.from_dotlist(ctx.args))
+
+        resolved = OmegaConf.to_container(raw_cfg, resolve=True)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        console.print(f"[red]Error loading/resolving workflow config:[/red] {exc}")
+        raise typer.Exit(code=1)
 
     try:
-        cfg = WorkflowConfig(**raw)
+        cfg = WorkflowConfig(**resolved)
     except Exception as exc:
         console.print(f"[red]Error parsing workflow config:[/red] {exc}")
         raise typer.Exit(code=1)
 
-    from devrun.workflow import WorkflowRunner
+    # Auto-detect stage to skip when --from-job is used without --start-after
+    if from_job and not start_after and task_name is not None:
+        detected_stage = runner.detect_stage_for_task(task_name, cfg)
+        if detected_stage:
+            start_after = detected_stage
+            console.print(
+                f"[dim]Auto-detected: skipping stage '{detected_stage}' "
+                f"based on job task type '{task_name}'[/dim]"
+            )
 
-    runner = WorkflowRunner()
-    result = runner.run(cfg, dry_run=dry_run)
-
-    if dry_run:
-        console.print(result)
-        console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
-    else:
-        console.print(f"[green]Workflow completed:[/green] {result}")
+    try:
+        if detach:
+            if dry_run:
+                console.print("[red]Error:[/red] --detach and --dry-run cannot be used together.")
+                raise typer.Exit(code=1)
+            wf_id = runner.run_detached(cfg, start_after=start_after)
+            console.print(
+                f"[green]Workflow {wf_id} started in background.[/green]\n"
+                f"Use [bold]devrun workflow status {wf_id}[/bold] to monitor."
+            )
+        else:
+            result = runner.run(cfg, dry_run=dry_run, start_after=start_after)
+            if dry_run:
+                console.print(result)
+                console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
+            else:
+                console.print(f"[green]Workflow completed:[/green] {result}")
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
 
 
 @workflow_app.command("status")

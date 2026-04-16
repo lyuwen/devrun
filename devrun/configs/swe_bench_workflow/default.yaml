@@ -1,14 +1,26 @@
 # configs/swe_bench_workflow/default.yaml
 # Full SWE-bench pipeline: inference → collect → evaluate
+#
+# Usage:
+#   devrun workflow run devrun/configs/swe_bench_workflow/default.yaml \
+#       params.model_name=openai/gpt-4 \
+#       params.dataset=/data/swebench/SWE-bench_Lite \
+#       params.working_dir=/home/user/project
+#
+# Run collect+eval from existing inference:
+#   devrun workflow run devrun/configs/swe_bench_workflow/default.yaml \
+#       --from-job <job_id>
+#
+# See docs/swe-bench-workflow-guide.md for full documentation.
 workflow: swe_bench
 
 params:
-  model_name: ""                  # REQUIRED: model identifier
-  dataset: ""                     # REQUIRED: absolute path to dataset
+  model_name: "<REQUIRED: model identifier (e.g. openai/gpt-4)>"
+  dataset: "<REQUIRED: absolute path to SWE-bench dataset>"
   split: test
   run_name: "run1"
   output_dir: "logs/run1"
-  working_dir: ""                 # REQUIRED: remote project root
+  working_dir: "<REQUIRED: remote project root directory>"
 
 stages:
   - name: inference

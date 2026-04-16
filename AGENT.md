@@ -28,9 +28,9 @@ All interactions are driven entirely by YAML configuration files.
 * **`devrun/models.py`:** Central Pydantic models. Core entity is `TaskSpec` which holds the final executed `command`, `env`, and `resources` and is returned by `Task.prepare()`.
 * **`devrun/registry.py`:** Custom decorator-based registry (`@register_task`, `@register_executor`) for automated discovery of plugins.
 * **`devrun/runner.py`:** Orchestration logic. Loads YAML configs, expands sweeps via Cartesian product, invokes task preparation, writes to DB, invokes executor plugin `submit()`, and updates DB on error.
-* **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`.
+* **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. The `workflow run` command supports OmegaConf overrides as trailing args, `--start-after <stage>` to skip stages, `--from-job <id>` to extract params from an existing job, and `--detach` for background execution.
 * **`devrun/db/jobs.py`:** Persistent SQLite job store with both `jobs` and `workflows` tables.
-* **`devrun/workflow.py`:** Multi-stage workflow engine with heartbeat-based polling, dependency resolution, timeout handling, and dry-run mode. Orchestrates stage transitions through pending → submitted → running → completed/failed/skipped.
+* **`devrun/workflow.py`:** Multi-stage workflow engine with heartbeat-based polling, dependency resolution, timeout handling, dry-run mode, and detached (background) execution. Orchestrates stage transitions through pending → submitted → running → completed/failed/skipped. Supports `--start-after` to skip stages (and transitive deps) with `skipped_by_user` status, `--from-job` to extract workflow params from existing job records, and `<REQUIRED:…>` placeholder validation that fails fast with helpful error messages. The heartbeat loop is shared between foreground (`run()`) and background (`run_detached()` → `_run_existing()`) execution paths.
 * **`devrun/utils/templates.py`:** Jinja2 template rendering utility with `shell_quote` filter (`shlex.quote`) and `StrictUndefined` mode. Templates live in `devrun/templates/`.
 * **`devrun/utils/swebench.py`:** Shared SWE-bench utilities including `derive_ds_dir()` for consistent DS_DIR path naming across tasks.
 * **`configs/`:** Example YAML configurations for execution (`executors.yaml`), deployment (`deploy_ray.yaml`), and logic (`eval_math.yaml`, `eval_sweep.yaml`, `inference.yaml`).
@@ -121,7 +121,7 @@ python -m pytest tests/ -v
 
 ### Test Coverage
 
-- **388 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
+- **674 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
 - Unit tests for all major components (models, registry, database, router, runner, tasks, executors, workflow engine)
 - Integration tests between modules
 - End-to-end workflow tests
