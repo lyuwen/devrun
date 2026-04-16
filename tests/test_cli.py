@@ -689,3 +689,32 @@ class TestWorkflowRunResolution:
 
             assert result.exit_code == 1
             assert "not found" in result.stdout.lower()
+
+    def test_workflow_run_help_with_target(self, tmp_path):
+        """'devrun workflow run <target> --help' shows workflow-specific help."""
+        mock_config = {
+            "workflow": "test_wf",
+            "params": {"model": "base", "lr": 0.01},
+            "stages": [
+                {"name": "train", "task": "eval", "executor": "local", "params": {}},
+                {"name": "eval", "task": "eval", "executor": "local", "depends_on": "train", "params": {}},
+            ],
+        }
+
+        with patch("devrun.runner.load_merged_config", return_value=mock_config):
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["workflow", "run", "my_workflow", "--help"])
+
+            assert result.exit_code == 0
+            assert "test_wf" in result.stdout
+            assert "params.model" in result.stdout
+            assert "params.lr" in result.stdout
+            assert "train" in result.stdout
+            assert "eval" in result.stdout
+
+    def test_workflow_run_help_without_target(self):
+        """'devrun workflow run --help' shows generic command help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "run", "--help"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
