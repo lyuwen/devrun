@@ -75,7 +75,7 @@ Columns: `workflow_id`, `workflow_name`, `stages_state` (JSON), `status`, `creat
 * **Datetime:** All timestamps use `datetime.now(timezone.utc)` (timezone-aware). `datetime.utcnow()` is deprecated in Python 3.12+ and must not be re-introduced.
 * **Log path propagation pattern:** When an executor knows the log path at submit time, it writes it to `task_spec.metadata["log_path"]`. The runner reads this after `submit_with_retry()` and passes it to `db.update_status(..., log_path=...)`. The runner then retrieves `record.log_path` and passes it as `executor.logs(remote_id, log_path=record.log_path)`. All `logs()` implementations accept the optional `log_path` kwarg.
 * **set_e passthrough:** Tasks that need `set -x` without `set -e` (e.g., retry loops) set `metadata["set_e"] = False`. `SlurmExecutor.submit()` reads this and passes it to `generate_sbatch_script(set_e=...)`. The default is `True` (preserving `set -ex` for all existing tasks).
-* **Workflow OmegaConf overrides:** `workflow run` resolves `${params.X}` interpolations via OmegaConf. Merge order: YAML base → `--from-job` extracted params → CLI trailing overrides. The `_PARAM_MAPPING` dict in `WorkflowRunner.extract_workflow_params()` maps task-level param keys to workflow-level dotlist keys.
+* **Workflow OmegaConf overrides:** `workflow run` resolves `${params.X}` interpolations via OmegaConf. Merge order: YAML base → `--from-job` extracted params → CLI trailing overrides. From-job params use `OmegaConf.merge()` (dict-only keys), while CLI overrides use `OmegaConf.update()` per-key to correctly handle list-indexed paths like `stages.0.params.X`. The `_PARAM_MAPPING` dict in `WorkflowRunner.extract_workflow_params()` maps task-level param keys to workflow-level dotlist keys.
 * **Workflow placeholder validation:** Required params use `<REQUIRED: description>` markers. `WorkflowRunner._validate_no_placeholders()` matches `^<REQUIRED(?::\s*.*?)?>$` and raises `ValueError` listing all unfilled fields before any submission.
 * **Workflow detach pattern:** `run_detached()` validates and creates the DB record synchronously, then forks via `subprocess.Popen([sys.executable, "-m", "devrun.workflow", "--state-file", ...])` with `start_new_session=True`. The child process drives the heartbeat loop on the pre-created record.
 
@@ -125,7 +125,7 @@ python -m pytest tests/ -v
 
 ### Test Coverage
 
-- **713 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
+- **728 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
 - Unit tests for all major components (models, registry, database, router, runner, tasks, executors, workflow engine)
 - Integration tests between modules
 - End-to-end workflow tests

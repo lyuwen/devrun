@@ -490,6 +490,139 @@ class TestWorkflowCLI:
         assert "dry-run" in result.stdout.lower()
 
 
+class TestWorkflowCLINewFeatures:
+    """Tests for new workflow CLI features: overrides, start-after, from-job, detach."""
+
+    def test_workflow_run_with_overrides(self, tmp_path):
+        """Trailing args should be passed as OmegaConf overrides to the workflow config."""
+        config = {
+            "workflow": "override_test",
+            "stages": [
+                {
+                    "name": "s1",
+                    "task": "eval",
+                    "executor": "local",
+                    "params": {"model": "default-model"},
+                },
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        # Use --dry-run to verify overrides are applied without needing to mock execution
+        runner = get_cli_runner()
+        result = runner.invoke(app, [
+            "workflow", "run", str(cfg_path), "--dry-run",
+            "stages.0.params.model=overridden-model",
+        ])
+        assert result.exit_code == 0
+        # The override should appear in the dry-run output
+        assert "overridden-model" in result.stdout
+
+    def test_workflow_run_start_after_flag(self, tmp_path):
+        """--start-after flag should be parsed and forwarded to WorkflowRunner."""
+        config = {
+            "workflow": "start_after_test",
+            "stages": [
+                {"name": "inference", "task": "eval", "executor": "local", "params": {"model": "x"}},
+                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference", "params": {"model": "x"}},
+                {"name": "evaluate", "task": "eval", "executor": "local", "depends_on": "collect", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        # Use --dry-run with --start-after to verify the flag is parsed and produces skip markers
+        runner = get_cli_runner()
+        result = runner.invoke(app, [
+            "workflow", "run", str(cfg_path),
+            "--start-after", "inference", "--dry-run",
+        ])
+        assert result.exit_code == 0
+        # Should show inference as skipped
+        assert "SKIPPED" in result.stdout or "skipped" in result.stdout.lower()
+
+    def test_workflow_run_from_job_flag(self, tmp_path):
+        """--from-job flag should be parsed and extract_workflow_params called."""
+        config = {
+            "workflow": "from_job_test",
+            "stages": [
+                {"name": "inference", "task": "eval", "executor": "local", "params": {"model": "x"}},
+                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        with patch("devrun.workflow.WorkflowRunner.extract_workflow_params") as mock_extract:
+            mock_extract.return_value = (
+                {"params.model_name": "from-job-model"},
+                "swe_bench_agentic",
+            )
+            with patch("devrun.workflow.WorkflowRunner.detect_stage_for_task", return_value=None):
+                with patch("devrun.workflow.WorkflowRunner.run", return_value="wf_789"):
+                    runner = get_cli_runner()
+                    result = runner.invoke(app, [
+                        "workflow", "run", str(cfg_path),
+                        "--from-job", "job_abc123",
+                    ])
+                    # The flag should be parsed and extract_workflow_params called
+                    assert result.exit_code in [0, 1]
+                    mock_extract.assert_called_once_with("job_abc123")
+
+    def test_workflow_run_detach_flag(self, tmp_path):
+        """--detach flag should call run_detached instead of run."""
+        config = {
+            "workflow": "detach_test",
+            "stages": [
+                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        with patch("devrun.workflow.WorkflowRunner.run_detached", return_value="wf_detach_001") as mock_detach:
+            runner = get_cli_runner()
+            result = runner.invoke(app, [
+                "workflow", "run", str(cfg_path),
+                "--detach",
+            ])
+            assert result.exit_code == 0
+            mock_detach.assert_called_once()
+            assert "background" in result.stdout.lower() or "wf_detach_001" in result.stdout
+
+    def test_workflow_run_placeholder_error(self, tmp_path):
+        """Workflow with unfilled <REQUIRED:...> placeholders should show helpful error."""
+        config = {
+            "workflow": "placeholder_test",
+            "stages": [
+                {
+                    "name": "s1",
+                    "task": "eval",
+                    "executor": "local",
+                    "params": {
+                        "model": "<REQUIRED:specify the model name>",
+                        "dataset": "/data/test",
+                    },
+                },
+            ],
+            "heartbeat_interval": 0.001,
+        }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
+
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "run", str(cfg_path)])
+        # Should fail with a helpful error about unfilled placeholders
+        assert result.exit_code == 1
+        output_lower = result.stdout.lower()
+        assert "required" in output_lower or "placeholder" in output_lower or "unfilled" in output_lower
+
+
 class TestNoArgsIsHelp:
     """Tests that all Typer apps show help when invoked with no arguments."""
 
@@ -523,62 +656,32 @@ class TestNoArgsIsHelp:
 
 
 class TestWorkflowRunResolution:
-    """Tests for workflow run using hierarchical config resolution."""
+    """Tests for workflow run using hierarchical config resolution via find_configs."""
 
-    def test_workflow_run_by_name(self):
-        """Verify workflow run accepts a name target and passes it to load_merged_config."""
-        mock_config = {
+    def test_workflow_run_by_name(self, tmp_path):
+        """Verify workflow run accepts a name target and resolves it via find_configs."""
+        config = {
             "workflow": "test_wf",
             "stages": [
                 {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
             ],
             "heartbeat_interval": 0.001,
         }
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(yaml.dump(config))
 
-        with patch("devrun.runner.load_merged_config", return_value=mock_config) as mock_load:
-            with patch("devrun.workflow.WorkflowRunner") as mock_wf_cls:
-                mock_runner = MagicMock()
-                mock_runner.run.return_value = "wf_123"
-                mock_wf_cls.return_value = mock_runner
-
+        with patch("devrun.runner.find_configs", return_value=[cfg_path]) as mock_find:
+            with patch("devrun.workflow.WorkflowRunner.run", return_value="wf_123"):
                 runner = get_cli_runner()
                 result = runner.invoke(app, ["workflow", "run", "my_workflow"])
 
                 assert result.exit_code == 0
-                mock_load.assert_called_once_with("my_workflow", overrides=[])
-
-    def test_workflow_run_with_overrides(self):
-        """Verify trailing args are passed as overrides to load_merged_config."""
-        mock_config = {
-            "workflow": "test_wf",
-            "stages": [
-                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
-            ],
-            "heartbeat_interval": 0.001,
-        }
-
-        with patch("devrun.runner.load_merged_config", return_value=mock_config) as mock_load:
-            with patch("devrun.workflow.WorkflowRunner") as mock_wf_cls:
-                mock_runner = MagicMock()
-                mock_runner.run.return_value = "wf_123"
-                mock_wf_cls.return_value = mock_runner
-
-                runner = get_cli_runner()
-                result = runner.invoke(
-                    app,
-                    ["workflow", "run", "my_workflow", "params.model=new", "params.lr=0.01"],
-                )
-
-                assert result.exit_code == 0
-                mock_load.assert_called_once_with(
-                    "my_workflow",
-                    overrides=["params.model=new", "params.lr=0.01"],
-                )
+                mock_find.assert_called_once_with("my_workflow")
 
     def test_workflow_run_not_found(self):
-        """When load_merged_config raises FileNotFoundError, exit code 1 with error."""
+        """When find_configs raises FileNotFoundError, exit code 1 with error."""
         with patch(
-            "devrun.runner.load_merged_config",
+            "devrun.runner.find_configs",
             side_effect=FileNotFoundError("Config for 'bogus' not found."),
         ):
             runner = get_cli_runner()
@@ -586,3 +689,32 @@ class TestWorkflowRunResolution:
 
             assert result.exit_code == 1
             assert "not found" in result.stdout.lower()
+
+    def test_workflow_run_help_with_target(self, tmp_path):
+        """'devrun workflow run <target> --help' shows workflow-specific help."""
+        mock_config = {
+            "workflow": "test_wf",
+            "params": {"model": "base", "lr": 0.01},
+            "stages": [
+                {"name": "train", "task": "eval", "executor": "local", "params": {}},
+                {"name": "eval", "task": "eval", "executor": "local", "depends_on": "train", "params": {}},
+            ],
+        }
+
+        with patch("devrun.runner.load_merged_config", return_value=mock_config):
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["workflow", "run", "my_workflow", "--help"])
+
+            assert result.exit_code == 0
+            assert "test_wf" in result.stdout
+            assert "params.model" in result.stdout
+            assert "params.lr" in result.stdout
+            assert "train" in result.stdout
+            assert "eval" in result.stdout
+
+    def test_workflow_run_help_without_target(self):
+        """'devrun workflow run --help' shows generic command help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow", "run", "--help"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
