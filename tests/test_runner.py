@@ -288,6 +288,36 @@ class TestRunnerStatus:
             result = runner.status(job_id)
             assert result["status"] == "completed"
 
+    def test_status_includes_progress_from_executor(self, executors_yaml, temp_dir):
+        """Verify runner.status() merges executor.progress() into the result dict."""
+        from devrun.db.jobs import JobStore
+
+        db_path = temp_dir / "test_progress.db"
+        store = JobStore(db_path)
+        job_id = store.insert("eval", "local", {"model": "test"})
+        store.update_status(job_id, JobStatus.RUNNING, remote_job_id="slurm_123")
+
+        mock_executor = MagicMock()
+        mock_executor.status.return_value = "running"
+        mock_executor.progress.return_value = {
+            "task_counts": {"completed": 50, "running": 10, "pending": 5},
+            "total_tasks": 65,
+        }
+
+        log_dir = temp_dir / ".devrun" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch("devrun.executors.local._LOG_DIR", log_dir),
+            patch("devrun.runner.resolve_executor", return_value=mock_executor),
+        ):
+            runner = TaskRunner(executors_path=str(executors_yaml), db_path=db_path)
+            result = runner.status(job_id)
+
+        assert "progress" in result
+        assert result["progress"]["total_tasks"] == 65
+        assert result["progress"]["task_counts"]["completed"] == 50
+
 
 class TestRunnerLogs:
     """Tests for TaskRunner.logs method."""

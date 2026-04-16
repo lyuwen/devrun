@@ -72,6 +72,32 @@ class TestCLIStatus:
             assert result.exit_code == 1
             assert "not found" in result.stdout.lower() or "error" in result.stdout.lower()
 
+    def test_status_shows_array_progress(self):
+        """Verify status formats array progress from executor."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            mock_runner.status.return_value = {
+                "job_id": "arr_100",
+                "task_name": "swe_bench_agentic",
+                "executor": "slurm",
+                "status": "running",
+                "created_at": "2024-01-01T00:00:00",
+                "progress": {
+                    "task_counts": {"completed": 50, "running": 10, "pending": 5},
+                    "total_tasks": 65,
+                },
+            }
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["status", "arr_100"])
+
+            assert result.exit_code == 0
+            assert "array_progress" in result.stdout
+            assert "50 completed" in result.stdout
+            assert "10 running" in result.stdout
+            assert "total: 65" in result.stdout
+
 
 class TestCLILogs:
     """Tests for the 'logs' command."""

@@ -139,7 +139,19 @@ class TaskRunner:
             except Exception as exc:
                 logger.warning("Could not refresh status for %s: %s", job_id, exc)
 
-        return record.model_dump(mode="json") if record else {}
+        result = record.model_dump(mode="json") if record else {}
+
+        # Fetch live progress info (e.g. array task counts) — best-effort
+        try:
+            executor = resolve_executor(record.executor, self.executor_configs)
+            remote_id = record.remote_job_id or job_id
+            progress = executor.progress(remote_id)
+            if progress:
+                result["progress"] = progress
+        except Exception as exc:
+            logger.warning("Could not fetch progress for %s: %s", job_id, exc)
+
+        return result
 
     def logs(self, job_id: str) -> str:
         """Retrieve logs for a job."""

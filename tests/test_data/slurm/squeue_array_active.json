@@ -1,0 +1,32 @@
+{
+  "jobs": [
+    {
+      "job_id": 100000,
+      "name": "devrun_array_job",
+      "array_job_id": {"set": true, "infinite": false, "number": 100000},
+      "array_task_id": {"set": false, "infinite": false, "number": 0},
+      "job_state": ["PENDING"]
+    },
+    {
+      "job_id": 100003,
+      "name": "devrun_array_job",
+      "array_job_id": {"set": true, "infinite": false, "number": 100000},
+      "array_task_id": {"set": true, "infinite": false, "number": 2},
+      "job_state": ["RUNNING"]
+    },
+    {
+      "job_id": 100006,
+      "name": "devrun_array_job",
+      "array_job_id": {"set": true, "infinite": false, "number": 100000},
+      "array_task_id": {"set": true, "infinite": false, "number": 5},
+      "job_state": ["RUNNING"]
+    },
+    {
+      "job_id": 100004,
+      "name": "devrun_array_job",
+      "array_job_id": {"set": true, "infinite": false, "number": 100000},
+      "array_task_id": {"set": true, "infinite": false, "number": 3},
+      "job_state": ["PENDING"]
+    }
+  ]
+}

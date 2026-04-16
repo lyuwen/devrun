@@ -43,7 +43,7 @@ Registered types: `local`, `ssh`, `slurm`, `http`.
 
 * **`LocalExecutor`:** Executes locally using `subprocess`, saving stout logs in `.devrun/logs/`.
 * **`SSHExecutor`:** Remote execution using `nohup bash` with a heredoc to safely pass arbitrary commands. Each job is tracked by a composite `pid:token` job ID where `token` is a UUID-derived string used as the remote log file name (`/tmp/devrun_ssh_{token}.log`). This ensures `logs()`, `status()`, and `cancel()` all reliably find the right file and process even after the SSH session ends.
-* **`SlurmExecutor`:** Generates `sbatch` scripts natively with unique UUID-suffixed filenames to prevent sweep collisions. If the `host` property is specified, it automatically uploads the script via `scp` and submits it via SSH, allowing local machines to natively dispatch to remote head nodes. After submission, the absolute log path is stored in `task_spec.metadata["log_path"]`, persisted to the DB, and used by `logs()` for reliable retrieval regardless of CWD.
+* **`SlurmExecutor`:** Generates `sbatch` scripts natively with unique UUID-suffixed filenames to prevent sweep collisions. If the `host` property is specified, it automatically uploads the script via `scp` and submits it via SSH, allowing local machines to natively dispatch to remote head nodes. After submission, the absolute log path is stored in `task_spec.metadata["log_path"]`, persisted to the DB, and used by `logs()` for reliable retrieval regardless of CWD. Status tracking uses `sacct --json` as the primary source (covers both active and finished jobs), with `squeue --json` as a fallback for very fresh jobs. Array jobs are aggregated: task states are counted and an overall status is derived (`running` if any active, `completed` if all done, `failed` if any failed). The optional `progress()` method returns per-task state counts for array job progress tracking by merging sacct (authoritative for terminal states) with squeue (catches pending/active tasks sacct may miss), using `merge_array_counts()`. The sacct result from the preceding `status()` call is cached in `_status_cache` to avoid a duplicate SSH round-trip.
 * **`HTTPExecutor`:** JSON POST payload to a REST API.
 
 ### File Synchronization (`devrun/utils/sync.py`)
@@ -114,6 +114,7 @@ python -m pytest tests/ -v
 | `test_swe_bench_collect.py` | Unit tests for SWEBenchCollectTask: jq command generation, DS_DIR consistency, json escaping |
 | `test_templates.py` | Unit tests for Jinja2 template utility and swe_bench_agentic.sh.j2 template |
 | `test_swebench_utils.py` | Unit tests for derive_ds_dir shared utility |
+| `test_slurm_status.py` | Unit tests for Slurm job status JSON parsing (sacct/squeue), array status aggregation, and SlurmExecutor status/progress methods |
 | `test_workflow_models.py` | Unit tests for WorkflowStage and WorkflowConfig Pydantic models |
 | `test_workflow.py` | Unit tests for WorkflowRunner: dependency ordering, failure handling, timeout, cancel, logs |
 | `test_workflow_simulation.py` | Simulation tests verifying full execution plan consistency across stages |
@@ -121,7 +122,7 @@ python -m pytest tests/ -v
 
 ### Test Coverage
 
-- **388 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
+- **713 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
 - Unit tests for all major components (models, registry, database, router, runner, tasks, executors, workflow engine)
 - Integration tests between modules
 - End-to-end workflow tests

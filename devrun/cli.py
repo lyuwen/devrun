@@ -225,6 +225,18 @@ def status(
         console.print(f"[red]{info['error']}[/red]")
         raise typer.Exit(code=1)
 
+    # Format array progress into a readable string if present
+    if "progress" in info:
+        progress = info.pop("progress")
+        counts = progress.get("task_counts", {})
+        total = progress.get("total_tasks", 0)
+        display_order = ["completed", "running", "pending", "failed", "cancelled"]
+        parts = [f"{counts[k]} {k}" for k in display_order if counts.get(k)]
+        for key, value in sorted(counts.items()):
+            if key not in display_order and value:
+                parts.append(f"{value} {key}")
+        info["array_progress"] = f"{', '.join(parts)} (total: {total})"
+
     table = Table(title=f"Job {job_id}")
     table.add_column("Field", style="cyan")
     table.add_column("Value")

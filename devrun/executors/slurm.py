@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 from devrun.executors.base import BaseExecutor
 from devrun.models import ExecutorEntry, TaskSpec
 from devrun.registry import register_executor
-from devrun.utils.slurm import generate_sbatch_script, parse_sbatch_output, parse_squeue_status
+from devrun.utils.slurm import (
+    generate_sbatch_script,
+    merge_array_counts,
+    parse_sacct_json,
+    parse_sbatch_output,
+    parse_squeue_json,
+)
 
 _SCRIPT_DIR = Path.home() / ".devrun" / "slurm_scripts"
 
@@ -55,6 +61,8 @@ class SlurmExecutor(BaseExecutor):
             )
         else:
             self._ssh = None
+
+        self._status_cache: dict[str, Any] = {}
 
         _SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -126,21 +134,56 @@ class SlurmExecutor(BaseExecutor):
 
         return slurm_job_id
 
-    def status(self, job_id: str) -> str:
-        result = self._run_cmd(f"squeue --job {job_id} -h -o %T 2>/dev/null")
-        if result.returncode == 0 and result.stdout.strip():
-            return parse_squeue_status(result.stdout, job_id)
+    # -- status / progress ---------------------------------------------------
 
-        # Fallback to sacct
-        result = self._run_cmd(
-            f"sacct -j {job_id} --parsable2 --noheader --format=JobID,State,ExitCode 2>/dev/null",
-        )
+    def _query_sacct(self, job_id: str) -> dict[str, Any]:
+        """Run ``sacct -j <id> --json`` and cache the parsed result."""
+        result = self._run_cmd(f"sacct -j {job_id} --json 2>/dev/null")
         if result.returncode == 0 and result.stdout.strip():
-            lines = [l.split("|") for l in result.stdout.strip().splitlines() if "|" in l]
-            for parts in lines:
-                if parts[0] == job_id and len(parts) >= 2:
-                    return parts[1].lower()
-        return "unknown"
+            info = parse_sacct_json(result.stdout, job_id)
+        else:
+            info = {"status": "unknown", "is_array": False, "task_counts": None, "total_tasks": None}
+        self._status_cache[job_id] = info
+        return info
+
+    def _query_squeue(self, job_id: str) -> dict[str, Any]:
+        """Run ``squeue --job <id> --json`` and return parsed result."""
+        result = self._run_cmd(f"squeue --job {job_id} --json 2>/dev/null")
+        if result.returncode == 0 and result.stdout.strip():
+            return parse_squeue_json(result.stdout, job_id)
+        return {"status": "unknown", "is_array": False, "task_counts": None, "total_tasks": None}
+
+    def status(self, job_id: str) -> str:
+        # Primary: sacct --json (covers both active and finished jobs)
+        info = self._query_sacct(job_id)
+        if info["status"] != "unknown":
+            return info["status"]
+        # Fallback: squeue --json (very fresh jobs not yet in sacct)
+        info = self._query_squeue(job_id)
+        return info["status"]
+
+    def progress(self, job_id: str) -> dict[str, Any] | None:
+        """Return array progress (task counts) if this is an array job.
+
+        Queries both sacct and squeue to get the full picture:
+        sacct is authoritative for terminal states (completed, failed, …),
+        squeue catches pending tasks that sacct may not have recorded yet.
+        """
+        sacct_info = self._status_cache.pop(job_id, None)
+        if sacct_info is None:
+            sacct_info = self._query_sacct(job_id)
+        if not sacct_info.get("is_array"):
+            return None
+
+        sacct_counts = sacct_info.get("task_counts") or {}
+        squeue_info = self._query_squeue(job_id)
+        squeue_counts = squeue_info.get("task_counts") or {}
+
+        merged = merge_array_counts(sacct_counts, squeue_counts)
+        if not merged:
+            return None
+        total = sum(merged.values())
+        return {"task_counts": merged, "total_tasks": total}
 
     def logs(self, job_id: str, log_path: str | None = None) -> str:
         path = log_path or f"devrun_{job_id}.out"
