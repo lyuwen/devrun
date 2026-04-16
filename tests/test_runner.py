@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from devrun.models import JobStatus, TaskConfig, TaskSpec
-from devrun.runner import TaskRunner
+from devrun.runner import TaskRunner, find_configs, load_merged_config
 
 
 class TestTaskRunnerInitialization:
@@ -556,6 +556,146 @@ class TestSubmitSingleMultiShard:
                     job_ids = runner.run(str(config_path))
                     # Should have 2 IDs, not a nested list
                     assert job_ids == ["id1", "id2"]
+
+
+class TestFindConfigsModuleLevel:
+    """Tests for the module-level find_configs() function."""
+
+    def test_find_configs_with_file_path(self, tmp_path):
+        """Given a path to an existing YAML file, returns [path]."""
+        cfg_file = tmp_path / "my_config.yaml"
+        cfg_file.write_text(yaml.dump({"task": "eval", "executor": "local"}))
+
+        result = find_configs(str(cfg_file), config_dirs=[tmp_path])
+        assert result == [cfg_file]
+
+    def test_find_configs_by_name(self, tmp_path):
+        """Given a name like 'myconfig', searches config_dirs for myconfig/default.yaml."""
+        config_dir = tmp_path / "configs"
+        task_dir = config_dir / "myconfig"
+        task_dir.mkdir(parents=True)
+        default_yaml = task_dir / "default.yaml"
+        default_yaml.write_text(yaml.dump({"task": "eval", "executor": "local"}))
+
+        result = find_configs("myconfig", config_dirs=[config_dir])
+        assert len(result) == 1
+        assert result[0] == default_yaml
+
+    def test_find_configs_with_variation(self, tmp_path):
+        """Given 'myconfig/custom', returns default.yaml then custom.yaml from config_dirs."""
+        config_dir = tmp_path / "configs"
+        task_dir = config_dir / "myconfig"
+        task_dir.mkdir(parents=True)
+
+        default_yaml = task_dir / "default.yaml"
+        default_yaml.write_text(yaml.dump({"task": "eval", "executor": "local", "params": {"base": True}}))
+
+        custom_yaml = task_dir / "custom.yaml"
+        custom_yaml.write_text(yaml.dump({"params": {"custom_flag": True}}))
+
+        result = find_configs("myconfig/custom", config_dirs=[config_dir])
+        assert len(result) == 2
+        assert result[0] == default_yaml
+        assert result[1] == custom_yaml
+
+    def test_find_configs_not_found(self, tmp_path):
+        """Raises FileNotFoundError when target doesn't match anything."""
+        config_dir = tmp_path / "empty_configs"
+        config_dir.mkdir(parents=True)
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            find_configs("nonexistent_task", config_dirs=[config_dir])
+        assert "nonexistent_task" in str(exc_info.value)
+        assert "not found" in str(exc_info.value).lower()
+
+    def test_find_configs_merge_order(self, tmp_path):
+        """With configs in multiple dirs, returns them in correct priority order."""
+        # dir1 is lower priority (comes first in the list), dir2 is higher
+        dir1 = tmp_path / "low_priority"
+        dir2 = tmp_path / "high_priority"
+        for d in [dir1, dir2]:
+            task_dir = d / "myconfig"
+            task_dir.mkdir(parents=True)
+            (task_dir / "default.yaml").write_text(
+                yaml.dump({"task": "eval", "executor": "local", "source": str(d)})
+            )
+
+        result = find_configs("myconfig", config_dirs=[dir1, dir2])
+        # Both dirs should contribute a default.yaml, dir1 first (lower priority)
+        assert len(result) == 2
+        assert result[0] == dir1 / "myconfig" / "default.yaml"
+        assert result[1] == dir2 / "myconfig" / "default.yaml"
+
+
+class TestLoadMergedConfigModuleLevel:
+    """Tests for the module-level load_merged_config() function."""
+
+    def test_load_merged_config_basic(self, tmp_path):
+        """Loads a single config and returns dict."""
+        config_dir = tmp_path / "configs"
+        task_dir = config_dir / "myconfig"
+        task_dir.mkdir(parents=True)
+        (task_dir / "default.yaml").write_text(
+            yaml.dump({"task": "eval", "executor": "local", "params": {"model": "base"}})
+        )
+
+        result = load_merged_config("myconfig", config_dirs=[config_dir])
+        assert isinstance(result, dict)
+        assert result["task"] == "eval"
+        assert result["executor"] == "local"
+        assert result["params"]["model"] == "base"
+
+    def test_load_merged_config_with_overrides(self, tmp_path):
+        """Applies OmegaConf dotlist overrides."""
+        config_dir = tmp_path / "configs"
+        task_dir = config_dir / "myconfig"
+        task_dir.mkdir(parents=True)
+        (task_dir / "default.yaml").write_text(
+            yaml.dump({"task": "eval", "executor": "local", "params": {"model": "base", "batch_size": 8}})
+        )
+
+        result = load_merged_config(
+            "myconfig",
+            overrides=["params.model=overridden-model", "params.batch_size=32"],
+            config_dirs=[config_dir],
+        )
+        assert result["params"]["model"] == "overridden-model"
+        assert result["params"]["batch_size"] == 32
+
+    def test_load_merged_config_merges_layers(self, tmp_path):
+        """With default in dir1 and override in dir2, deep-merges correctly."""
+        dir1 = tmp_path / "low"
+        dir2 = tmp_path / "high"
+
+        for d in [dir1, dir2]:
+            (d / "myconfig").mkdir(parents=True)
+
+        # dir1: base config with several params
+        (dir1 / "myconfig" / "default.yaml").write_text(
+            yaml.dump({
+                "task": "eval",
+                "executor": "local",
+                "params": {"model": "base-model", "batch_size": 8, "dataset": "math500"},
+            })
+        )
+        # dir2: override config changes model, adds new key
+        (dir2 / "myconfig" / "default.yaml").write_text(
+            yaml.dump({
+                "params": {"model": "override-model", "lr": 0.001},
+            })
+        )
+
+        result = load_merged_config("myconfig", config_dirs=[dir1, dir2])
+        # Higher-priority dir2 should override 'model'
+        assert result["params"]["model"] == "override-model"
+        # dir1 keys not in dir2 should be preserved
+        assert result["params"]["batch_size"] == 8
+        assert result["params"]["dataset"] == "math500"
+        # dir2 new key should appear
+        assert result["params"]["lr"] == 0.001
+        # Top-level keys from dir1 should persist
+        assert result["task"] == "eval"
+        assert result["executor"] == "local"
 
 
 def eval_config_yaml(temp_dir):

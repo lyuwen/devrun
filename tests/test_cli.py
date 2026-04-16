@@ -488,3 +488,101 @@ class TestWorkflowCLI:
         result = runner.invoke(app, ["workflow", "run", str(cfg_path), "--dry-run"])
         assert result.exit_code == 0
         assert "dry-run" in result.stdout.lower()
+
+
+class TestNoArgsIsHelp:
+    """Tests that all Typer apps show help when invoked with no arguments."""
+
+    def test_no_args_shows_help(self):
+        """Running 'devrun' with no args exits 0 and output contains 'Usage'."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, [])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+    def test_workflow_no_args_shows_help(self):
+        """Running 'devrun workflow' with no args shows help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["workflow"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+    def test_keys_no_args_shows_help(self):
+        """Running 'devrun keys' with no args shows help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["keys"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+    def test_presets_no_args_shows_help(self):
+        """Running 'devrun presets' with no args shows help."""
+        runner = get_cli_runner()
+        result = runner.invoke(app, ["presets"])
+        assert result.exit_code == 0
+        assert "usage" in result.stdout.lower()
+
+
+class TestWorkflowRunResolution:
+    """Tests for workflow run using hierarchical config resolution."""
+
+    def test_workflow_run_by_name(self):
+        """Verify workflow run accepts a name target and passes it to load_merged_config."""
+        mock_config = {
+            "workflow": "test_wf",
+            "stages": [
+                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+
+        with patch("devrun.runner.load_merged_config", return_value=mock_config) as mock_load:
+            with patch("devrun.workflow.WorkflowRunner") as mock_wf_cls:
+                mock_runner = MagicMock()
+                mock_runner.run.return_value = "wf_123"
+                mock_wf_cls.return_value = mock_runner
+
+                runner = get_cli_runner()
+                result = runner.invoke(app, ["workflow", "run", "my_workflow"])
+
+                assert result.exit_code == 0
+                mock_load.assert_called_once_with("my_workflow", overrides=[])
+
+    def test_workflow_run_with_overrides(self):
+        """Verify trailing args are passed as overrides to load_merged_config."""
+        mock_config = {
+            "workflow": "test_wf",
+            "stages": [
+                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
+            ],
+            "heartbeat_interval": 0.001,
+        }
+
+        with patch("devrun.runner.load_merged_config", return_value=mock_config) as mock_load:
+            with patch("devrun.workflow.WorkflowRunner") as mock_wf_cls:
+                mock_runner = MagicMock()
+                mock_runner.run.return_value = "wf_123"
+                mock_wf_cls.return_value = mock_runner
+
+                runner = get_cli_runner()
+                result = runner.invoke(
+                    app,
+                    ["workflow", "run", "my_workflow", "params.model=new", "params.lr=0.01"],
+                )
+
+                assert result.exit_code == 0
+                mock_load.assert_called_once_with(
+                    "my_workflow",
+                    overrides=["params.model=new", "params.lr=0.01"],
+                )
+
+    def test_workflow_run_not_found(self):
+        """When load_merged_config raises FileNotFoundError, exit code 1 with error."""
+        with patch(
+            "devrun.runner.load_merged_config",
+            side_effect=FileNotFoundError("Config for 'bogus' not found."),
+        ):
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["workflow", "run", "bogus"])
+
+            assert result.exit_code == 1
+            assert "not found" in result.stdout.lower()
