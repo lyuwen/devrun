@@ -447,9 +447,17 @@ app.add_typer(workflow_app, name="workflow")
 
 def _show_workflow_help(target: str) -> None:
     """Show help for a specific workflow based on its configuration."""
+    from omegaconf import OmegaConf
     from devrun.runner import load_merged_config
     from rich.panel import Panel
     from rich.text import Text
+
+    # Register cross-stage resolver so ${stages:...} tokens don't error
+    if not OmegaConf.has_resolver("stages"):
+        OmegaConf.register_new_resolver(
+            "stages",
+            lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+        )
 
     try:
         raw = load_merged_config(target)
@@ -483,6 +491,9 @@ def _show_workflow_help(target: str) -> None:
         console.print()
 
     # Stages
+    import re as _re
+    _ref_pattern = _re.compile(r"<<STAGE_REF:([\w]+):([\w.]+)>>")
+
     stages = raw.get("stages", [])
     if stages:
         stage_table = Table(title="Stages", show_edge=False, title_justify="left", header_style="bold cyan")
@@ -490,6 +501,7 @@ def _show_workflow_help(target: str) -> None:
         stage_table.add_column("Task", style="cyan")
         stage_table.add_column("Executor", style="green")
         stage_table.add_column("Depends On", style="dim")
+        stage_table.add_column("Params", style="dim")
 
         for s in stages:
             deps = s.get("depends_on", None)
@@ -499,9 +511,35 @@ def _show_workflow_help(target: str) -> None:
                 deps_str = str(deps)
             else:
                 deps_str = "—"
-            stage_table.add_row(s.get("name", "?"), s.get("task", "?"), s.get("executor", "?"), deps_str)
+            # Summarise params — show cross-stage refs with readable format
+            stage_params = s.get("params", {})
+            param_parts: list[str] = []
+            for pk, pv in list(stage_params.items())[:4]:
+                pv_str = str(pv)
+                # Format sentinel strings as readable cross-stage refs
+                pv_str = _ref_pattern.sub(r"stages.\1.\2", pv_str)
+                param_parts.append(f"{pk}={pv_str}")
+            extra = len(stage_params) - 4
+            if extra > 0:
+                param_parts.append(f"+{extra} more")
+            params_str = ", ".join(param_parts) if param_parts else "—"
+            stage_table.add_row(
+                s.get("name", "?"),
+                s.get("task", "?"),
+                s.get("executor", "?"),
+                deps_str,
+                params_str,
+            )
 
         console.print(stage_table)
+        console.print()
+
+    # Note about auto-forwarded params
+    if any(s.get("depends_on") for s in stages):
+        console.print(
+            "[dim]Note: Params not listed for a stage may be auto-forwarded "
+            "from its dependencies at run time.[/dim]"
+        )
         console.print()
 
     # Usage example
@@ -556,8 +594,17 @@ def workflow_run(
     from devrun.models import WorkflowConfig
     from devrun.workflow import WorkflowRunner
 
+    # Register the cross-stage reference resolver.  At config-load time it
+    # embeds a sentinel; WorkflowRunner resolves it at submit time.
+    if not OmegaConf.has_resolver("stages"):
+        OmegaConf.register_new_resolver(
+            "stages",
+            lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+        )
+
     runner = WorkflowRunner()
     task_name: Optional[str] = None
+    skipped_params: dict[str, dict] = {}
 
     # Merge order: YAML base (hierarchical) → from-job params → CLI overrides (highest priority)
     try:
@@ -613,6 +660,9 @@ def workflow_run(
         detected_stage = runner.detect_stage_for_task(task_name, cfg)
         if detected_stage:
             start_after = detected_stage
+            record = runner._db.get(from_job)
+            if record is not None:
+                skipped_params[detected_stage] = record.params_dict
             console.print(
                 f"[dim]Auto-detected: skipping stage '{detected_stage}' "
                 f"based on job task type '{task_name}'[/dim]"
@@ -623,13 +673,22 @@ def workflow_run(
             if dry_run:
                 console.print("[red]Error:[/red] --detach and --dry-run cannot be used together.")
                 raise typer.Exit(code=1)
-            wf_id = runner.run_detached(cfg, start_after=start_after)
+            wf_id = runner.run_detached(
+                cfg,
+                start_after=start_after,
+                skipped_params=skipped_params or None,
+            )
             console.print(
                 f"[green]Workflow {wf_id} started in background.[/green]\n"
                 f"Use [bold]devrun workflow status {wf_id}[/bold] to monitor."
             )
         else:
-            result = runner.run(cfg, dry_run=dry_run, start_after=start_after)
+            result = runner.run(
+                cfg,
+                dry_run=dry_run,
+                start_after=start_after,
+                skipped_params=skipped_params or None,
+            )
             if dry_run:
                 console.print(result)
                 console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")

@@ -718,3 +718,155 @@ class TestWorkflowRunResolution:
         result = runner.invoke(app, ["workflow", "run", "--help"])
         assert result.exit_code == 0
         assert "usage" in result.stdout.lower()
+
+
+class TestWorkflowCrossStageRefs:
+    """CLI-level tests for cross-stage reference handling."""
+
+    def test_workflow_run_cross_stage_refs(self, tmp_path):
+        """YAML with ${stages:...} tokens loads successfully and passes to WorkflowRunner."""
+        config_text = """\
+workflow: test_wf
+params:
+  model: gpt-4
+stages:
+  - name: step1
+    task: eval
+    executor: local
+    params:
+      model: "${params.model}"
+      output_dir: logs/run1
+  - name: step2
+    task: eval
+    executor: local
+    depends_on: step1
+    params:
+      path: "${stages:step1,output_dir}/pred.jsonl"
+"""
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(config_text)
+
+        from omegaconf import OmegaConf
+        if not OmegaConf.has_resolver("stages"):
+            OmegaConf.register_new_resolver(
+                "stages",
+                lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+            )
+
+        with patch("devrun.runner.find_configs", return_value=[cfg_path]):
+            with patch("devrun.workflow.WorkflowRunner.run", return_value="wf_123") as mock_run:
+                runner = get_cli_runner()
+                result = runner.invoke(app, ["workflow", "run", "my_workflow"])
+
+                assert result.exit_code == 0
+                # WorkflowRunner.run was called
+                assert mock_run.called
+                call_cfg = mock_run.call_args[0][0]
+                # The sentinel should be in the parsed config
+                assert "<<STAGE_REF:step1:output_dir>>" in call_cfg.stages[1].params["path"]
+
+    def test_workflow_run_from_job_skipped_params(self, tmp_path):
+        """--from-job should populate skipped_params for the detected stage."""
+        config_text = """\
+workflow: test_wf
+params:
+  model: gpt-4
+stages:
+  - name: inference
+    task: swe_bench_agentic
+    executor: slurm
+    params:
+      model: "${params.model}"
+  - name: collect
+    task: swe_bench_collect
+    executor: ssh
+    depends_on: inference
+    params:
+      path: "${stages:inference,model}"
+"""
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(config_text)
+
+        from omegaconf import OmegaConf
+        if not OmegaConf.has_resolver("stages"):
+            OmegaConf.register_new_resolver(
+                "stages",
+                lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+            )
+
+        from devrun.models import JobRecord, JobStatus
+
+        mock_job = JobRecord(
+            job_id="j1",
+            task_name="swe_bench_agentic",
+            executor="slurm",
+            parameters='{"model": "gpt-4", "output_dir": "/logs/run1"}',
+            status=JobStatus.COMPLETED,
+        )
+
+        with patch("devrun.runner.find_configs", return_value=[cfg_path]):
+            with patch(
+                "devrun.workflow.WorkflowRunner.extract_workflow_params",
+                return_value=({"params.model": "gpt-4"}, "swe_bench_agentic"),
+            ):
+                with patch(
+                    "devrun.workflow.WorkflowRunner.detect_stage_for_task",
+                    return_value="inference",
+                ):
+                    with patch(
+                        "devrun.db.jobs.JobStore.get",
+                        return_value=mock_job,
+                    ):
+                        with patch(
+                            "devrun.workflow.WorkflowRunner.run",
+                            return_value="wf_456",
+                        ) as mock_run:
+                            runner = get_cli_runner()
+                            result = runner.invoke(
+                                app,
+                                ["workflow", "run", "my_workflow", "--from-job", "j1"],
+                            )
+
+                            assert result.exit_code == 0
+                            # WorkflowRunner.run was called with skipped_params
+                            assert mock_run.called
+                            call_kwargs = mock_run.call_args[1]
+                            assert "skipped_params" in call_kwargs
+                            sp = call_kwargs["skipped_params"]
+                            assert "inference" in sp
+                            assert sp["inference"]["model"] == "gpt-4"
+                            assert sp["inference"]["output_dir"] == "/logs/run1"
+
+    def test_workflow_help_shows_cross_stage_refs(self, tmp_path):
+        """Workflow help should render cross-stage refs readably."""
+        mock_config = {
+            "workflow": "test_wf",
+            "params": {"model": "gpt-4"},
+            "stages": [
+                {
+                    "name": "inference",
+                    "task": "eval",
+                    "executor": "local",
+                    "params": {"model": "gpt-4", "output_dir": "logs/run1"},
+                },
+                {
+                    "name": "collect",
+                    "task": "eval",
+                    "executor": "ssh",
+                    "depends_on": "inference",
+                    "params": {
+                        "path": "<<STAGE_REF:inference:output_dir>>/pred.jsonl",
+                    },
+                },
+            ],
+        }
+
+        with patch("devrun.runner.load_merged_config", return_value=mock_config):
+            runner = get_cli_runner()
+            result = runner.invoke(app, ["workflow", "run", "my_workflow", "--help"])
+
+            assert result.exit_code == 0
+            # Cross-stage ref should be shown in readable format
+            assert "stages.inference.output_dir" in result.stdout
+            # Auto-forward note should appear
+            assert "auto-forwarded" in result.stdout.lower()

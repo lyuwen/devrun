@@ -38,7 +38,7 @@ class TestWorkflowRunner:
     def test_dependency_ordering(self, workflow_runner, simple_config):
         """step2 depends on step1, so step1 must run first."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 workflow_runner.run(simple_config)
                 calls = [c.args[0] for c in mock_submit.call_args_list]
@@ -48,7 +48,7 @@ class TestWorkflowRunner:
     def test_failure_stops_workflow(self, workflow_runner, simple_config):
         """If step1 fails, step2 should never be submitted."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="failed"):
                 wf_id = workflow_runner.run(simple_config)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -57,7 +57,7 @@ class TestWorkflowRunner:
 
     def test_all_stages_complete(self, workflow_runner, simple_config):
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(simple_config)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -71,7 +71,7 @@ class TestWorkflowRunner:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="running"):
                 wf_id = workflow_runner.run(cfg)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -93,7 +93,7 @@ class TestWorkflowRunner:
     def test_skipped_stage_when_dep_fails(self, workflow_runner, simple_config):
         """step2 should be skipped when step1 fails."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="failed"):
                 wf_id = workflow_runner.run(simple_config)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -204,7 +204,7 @@ class TestWorkflowRunnerParallelStages:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(cfg)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -224,7 +224,7 @@ class TestWorkflowRunnerParallelStages:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(cfg)
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -329,7 +329,7 @@ class TestWorkflowStartAfter:
     def test_start_after_skips_named_stage(self, workflow_runner, three_stage_config):
         """When start_after='inference', the inference stage is pre-marked as skipped_by_user."""
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(three_stage_config, start_after="inference")
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -354,7 +354,7 @@ class TestWorkflowStartAfter:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 wf_id = workflow_runner.run(cfg, start_after="inference")
                 record = workflow_runner._db.get_workflow(wf_id)
@@ -582,7 +582,7 @@ class TestPlaceholderValidation:
             heartbeat_interval=0.001,
         )
         with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
                 # Should not raise
                 wf_id = workflow_runner.run(cfg)
@@ -652,3 +652,411 @@ class TestEnhancedLogs:
             # The result should include actual log content or at least delegate
             assert isinstance(result, str)
             assert len(result) > 0
+
+
+# ============================================================================
+# Cross-stage parameter resolution tests
+# ============================================================================
+
+
+class TestResolveStageParams:
+    """Tests for WorkflowRunner._resolve_stage_params()."""
+
+    def test_cross_ref_simple(self, workflow_runner):
+        """A sentinel string is replaced with the dep's actual value."""
+        stage = WorkflowStage(
+            name="collect",
+            task="eval",
+            executor="local",
+            params={"output_dir": "<<STAGE_REF:inference:output_dir>>"},
+            depends_on="inference",
+        )
+        stages_state = {
+            "inference": {
+                "status": "completed",
+                "resolved_params": {"output_dir": "/data/logs/run1", "model": "gpt-4"},
+            },
+        }
+        resolved, auto_keys = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["output_dir"] == "/data/logs/run1"
+
+    def test_cross_ref_concatenation(self, workflow_runner):
+        """Sentinel embedded in a larger string is replaced correctly."""
+        stage = WorkflowStage(
+            name="collect",
+            task="eval",
+            executor="local",
+            params={
+                "predictions": "<<STAGE_REF:inference:output_dir>>/predictions.jsonl",
+            },
+            depends_on="inference",
+        )
+        stages_state = {
+            "inference": {
+                "status": "completed",
+                "resolved_params": {"output_dir": "logs/run1"},
+            },
+        }
+        resolved, _ = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["predictions"] == "logs/run1/predictions.jsonl"
+
+    def test_cross_ref_preserves_non_string_types(self, workflow_runner):
+        """When a sentinel spans the full value and the ref is non-string, preserve the type."""
+        stage = WorkflowStage(
+            name="step2",
+            task="eval",
+            executor="local",
+            params={"count": "<<STAGE_REF:step1:count>>"},
+            depends_on="step1",
+        )
+        stages_state = {
+            "step1": {
+                "status": "completed",
+                "resolved_params": {"count": 42},
+            },
+        }
+        resolved, _ = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["count"] == 42
+        assert isinstance(resolved["count"], int)
+
+    def test_auto_forward_missing_param(self, workflow_runner):
+        """Params missing from the stage are auto-forwarded from the dep."""
+        stage = WorkflowStage(
+            name="collect",
+            task="eval",
+            executor="local",
+            params={"model_name_or_path": "gpt-4"},
+            depends_on="inference",
+        )
+        stages_state = {
+            "inference": {
+                "status": "completed",
+                "resolved_params": {
+                    "output_dir": "/logs/run1",
+                    "dataset": "/data/swebench",
+                    "split": "test",
+                    "working_dir": "/home/user",
+                },
+            },
+        }
+        resolved, auto_keys = workflow_runner._resolve_stage_params(stage, stages_state)
+        # Existing explicit param preserved
+        assert resolved["model_name_or_path"] == "gpt-4"
+        # Auto-forwarded params
+        assert resolved["output_dir"] == "/logs/run1"
+        assert resolved["dataset"] == "/data/swebench"
+        assert resolved["split"] == "test"
+        assert resolved["working_dir"] == "/home/user"
+        # Track which keys were auto-forwarded
+        assert auto_keys == {"output_dir", "dataset", "split", "working_dir"}
+
+    def test_explicit_param_not_overwritten(self, workflow_runner):
+        """An explicitly set param is never overwritten by auto-forward."""
+        stage = WorkflowStage(
+            name="step2",
+            task="eval",
+            executor="local",
+            params={"model": "my-model"},
+            depends_on="step1",
+        )
+        stages_state = {
+            "step1": {
+                "status": "completed",
+                "resolved_params": {"model": "dep-model", "extra": "val"},
+            },
+        }
+        resolved, auto_keys = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["model"] == "my-model"  # NOT dep-model
+        assert resolved["extra"] == "val"
+        assert "model" not in auto_keys
+        assert "extra" in auto_keys
+
+    def test_missing_ref_raises(self, workflow_runner):
+        """Referencing a param that doesn't exist in the dep raises ValueError."""
+        stage = WorkflowStage(
+            name="collect",
+            task="eval",
+            executor="local",
+            params={"x": "<<STAGE_REF:inference:nonexistent>>"},
+            depends_on="inference",
+        )
+        stages_state = {
+            "inference": {
+                "status": "completed",
+                "resolved_params": {"output_dir": "/logs"},
+            },
+        }
+        with pytest.raises(ValueError, match="nonexistent"):
+            workflow_runner._resolve_stage_params(stage, stages_state)
+
+    def test_missing_stage_raises(self, workflow_runner):
+        """Referencing a stage that doesn't exist raises ValueError."""
+        stage = WorkflowStage(
+            name="collect",
+            task="eval",
+            executor="local",
+            params={"x": "<<STAGE_REF:unknown_stage:param>>"},
+            depends_on="inference",
+        )
+        stages_state = {
+            "inference": {
+                "status": "completed",
+                "resolved_params": {"param": "val"},
+            },
+        }
+        with pytest.raises(ValueError, match="unknown_stage"):
+            workflow_runner._resolve_stage_params(stage, stages_state)
+
+    def test_multi_dep_auto_forward_first_wins(self, workflow_runner):
+        """With multiple deps, first dep's value wins for auto-forward."""
+        stage = WorkflowStage(
+            name="step3",
+            task="eval",
+            executor="local",
+            params={},
+            depends_on=["step1", "step2"],
+        )
+        stages_state = {
+            "step1": {
+                "status": "completed",
+                "resolved_params": {"shared": "from_step1", "only_1": "val1"},
+            },
+            "step2": {
+                "status": "completed",
+                "resolved_params": {"shared": "from_step2", "only_2": "val2"},
+            },
+        }
+        resolved, auto_keys = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["shared"] == "from_step1"  # first dep wins
+        assert resolved["only_1"] == "val1"
+        assert resolved["only_2"] == "val2"
+        assert auto_keys == {"shared", "only_1", "only_2"}
+
+    def test_no_deps_no_auto_forward(self, workflow_runner):
+        """A stage with no dependencies gets no auto-forwarded params."""
+        stage = WorkflowStage(
+            name="step1",
+            task="eval",
+            executor="local",
+            params={"model": "gpt-4"},
+        )
+        resolved, auto_keys = workflow_runner._resolve_stage_params(stage, {})
+        assert resolved == {"model": "gpt-4"}
+        assert auto_keys == set()
+
+    def test_nested_dict_sentinel_resolved(self, workflow_runner):
+        """Sentinels inside nested dicts are resolved."""
+        stage = WorkflowStage(
+            name="step2",
+            task="eval",
+            executor="local",
+            params={"config": {"path": "<<STAGE_REF:step1:output>>"}},
+            depends_on="step1",
+        )
+        stages_state = {
+            "step1": {
+                "status": "completed",
+                "resolved_params": {"output": "/data/out"},
+            },
+        }
+        resolved, _ = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["config"]["path"] == "/data/out"
+
+    def test_list_sentinel_resolved(self, workflow_runner):
+        """Sentinels inside lists are resolved."""
+        stage = WorkflowStage(
+            name="step2",
+            task="eval",
+            executor="local",
+            params={"paths": ["<<STAGE_REF:step1:output>>", "fixed"]},
+            depends_on="step1",
+        )
+        stages_state = {
+            "step1": {
+                "status": "completed",
+                "resolved_params": {"output": "/data/out"},
+            },
+        }
+        resolved, _ = workflow_runner._resolve_stage_params(stage, stages_state)
+        assert resolved["paths"] == ["/data/out", "fixed"]
+
+    def test_complex_ref_in_concatenation_raises(self, workflow_runner):
+        """Interpolating a dict/list into a string concatenation raises ValueError."""
+        stage = WorkflowStage(
+            name="step2",
+            task="eval",
+            executor="local",
+            params={"path": "prefix/<<STAGE_REF:step1:config>>/suffix"},
+            depends_on="step1",
+        )
+        stages_state = {
+            "step1": {
+                "status": "completed",
+                "resolved_params": {"config": {"key": "val"}},
+            },
+        }
+        with pytest.raises(ValueError, match="complex value"):
+            workflow_runner._resolve_stage_params(stage, stages_state)
+
+
+class TestCrossStageIntegration:
+    """Integration tests for cross-stage params through the heartbeat loop."""
+
+    def test_submit_stores_resolved_params(self, workflow_runner):
+        """After submission, resolved_params should be stored in stages_state."""
+        cfg = WorkflowConfig(
+            workflow="test",
+            stages=[
+                WorkflowStage(
+                    name="step1",
+                    task="eval",
+                    executor="local",
+                    params={"model": "gpt-4", "output_dir": "/logs"},
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
+            mock_submit.return_value = (
+                "db1",
+                "remote1",
+                {"model": "gpt-4", "output_dir": "/logs"},
+            )
+            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
+                wf_id = workflow_runner.run(cfg)
+                record = workflow_runner._db.get_workflow(wf_id)
+                stages = json.loads(record["stages_state"])
+                assert stages["step1"]["resolved_params"] == {
+                    "model": "gpt-4",
+                    "output_dir": "/logs",
+                }
+
+    def test_heartbeat_resolves_downstream(self, workflow_runner):
+        """Full loop: step2 should get step1's resolved params forwarded."""
+        cfg = WorkflowConfig(
+            workflow="test",
+            stages=[
+                WorkflowStage(
+                    name="step1",
+                    task="eval",
+                    executor="local",
+                    params={"model": "gpt-4", "output_dir": "/logs"},
+                ),
+                WorkflowStage(
+                    name="step2",
+                    task="eval",
+                    executor="local",
+                    params={
+                        "predictions": "<<STAGE_REF:step1:output_dir>>/pred.jsonl",
+                    },
+                    depends_on="step1",
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+        call_args_captured = []
+
+        def fake_submit(stage_name, stage, stages_state):
+            resolved, _ = workflow_runner._resolve_stage_params(stage, stages_state)
+            call_args_captured.append((stage_name, resolved))
+            return ("db_id", "remote_id", resolved)
+
+        with patch.object(workflow_runner, "_submit_stage", side_effect=fake_submit):
+            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
+                workflow_runner.run(cfg)
+
+        assert len(call_args_captured) == 2
+        # step1 gets its own params
+        assert call_args_captured[0][0] == "step1"
+        assert call_args_captured[0][1]["output_dir"] == "/logs"
+        # step2 resolves the cross-stage ref
+        assert call_args_captured[1][0] == "step2"
+        assert call_args_captured[1][1]["predictions"] == "/logs/pred.jsonl"
+        # Auto-forwarded params
+        assert call_args_captured[1][1]["model"] == "gpt-4"
+        assert call_args_captured[1][1]["output_dir"] == "/logs"
+
+    def test_skipped_params_from_job(self, workflow_runner):
+        """Skipped stages should use provided params for downstream resolution."""
+        cfg = WorkflowConfig(
+            workflow="test",
+            stages=[
+                WorkflowStage(
+                    name="inference",
+                    task="eval",
+                    executor="local",
+                    params={"model": "gpt-4", "output_dir": "/logs"},
+                ),
+                WorkflowStage(
+                    name="collect",
+                    task="eval",
+                    executor="local",
+                    params={
+                        "path": "<<STAGE_REF:inference:output_dir>>/pred.jsonl",
+                    },
+                    depends_on="inference",
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+        skipped_params = {
+            "inference": {
+                "model": "gpt-4",
+                "output_dir": "/existing/logs/run1",
+                "dataset": "/data/swe",
+            },
+        }
+
+        call_args_captured = []
+
+        def fake_submit(stage_name, stage, stages_state):
+            resolved, _ = workflow_runner._resolve_stage_params(stage, stages_state)
+            call_args_captured.append((stage_name, resolved))
+            return ("db_id", "remote_id", resolved)
+
+        with patch.object(workflow_runner, "_submit_stage", side_effect=fake_submit):
+            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
+                workflow_runner.run(
+                    cfg,
+                    start_after="inference",
+                    skipped_params=skipped_params,
+                )
+
+        # Only collect was submitted (inference was skipped)
+        assert len(call_args_captured) == 1
+        assert call_args_captured[0][0] == "collect"
+        # Cross-stage ref resolved from skipped stage's params
+        assert call_args_captured[0][1]["path"] == "/existing/logs/run1/pred.jsonl"
+        # Auto-forwarded params from skipped stage
+        assert call_args_captured[0][1]["model"] == "gpt-4"
+        assert call_args_captured[0][1]["dataset"] == "/data/swe"
+
+    def test_dry_run_simulated_resolution(self, workflow_runner):
+        """Dry-run should simulate cross-stage resolution in the output."""
+        cfg = WorkflowConfig(
+            workflow="test",
+            stages=[
+                WorkflowStage(
+                    name="step1",
+                    task="eval",
+                    executor="local",
+                    params={"output_dir": "/logs/run1"},
+                ),
+                WorkflowStage(
+                    name="step2",
+                    task="eval",
+                    executor="local",
+                    params={
+                        "predictions": "<<STAGE_REF:step1:output_dir>>/pred.jsonl",
+                    },
+                    depends_on="step1",
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+        result = workflow_runner.run(cfg, dry_run=True)
+        # The dry-run should show the resolved value, not the sentinel
+        assert "/logs/run1/pred.jsonl" in result
+        assert "<<STAGE_REF" not in result
+        # Auto-forwarded params should be annotated
+        assert "[auto]" in result

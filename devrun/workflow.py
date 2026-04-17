@@ -1,6 +1,7 @@
 """WorkflowRunner — orchestrates multi-stage workflows with heartbeat polling."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -19,6 +20,11 @@ from devrun.registry import get_task_class
 from devrun.router import resolve_executor
 
 logger = logging.getLogger("devrun.workflow")
+
+# Pattern for cross-stage reference sentinels embedded by the OmegaConf
+# ``stages`` resolver.  The resolver emits ``<<STAGE_REF:stage:param>>``
+# at config-load time; WorkflowRunner replaces them at submit time.
+STAGE_REF_PATTERN = re.compile(r"<<STAGE_REF:([\w]+):([\w.]+)>>")
 
 
 class WorkflowRunner:
@@ -40,8 +46,17 @@ class WorkflowRunner:
         config: WorkflowConfig,
         dry_run: bool = False,
         start_after: str | None = None,
+        skipped_params: dict[str, dict[str, Any]] | None = None,
     ) -> str:
         """Execute (or dry-run) a workflow.
+
+        Args:
+            config: Parsed workflow configuration.
+            dry_run: Preview execution plan without submitting.
+            start_after: Skip this stage and its transitive dependencies.
+            skipped_params: Pre-resolved params for stages skipped via
+                ``--from-job``.  Keys are stage names, values are the
+                param dicts from the corresponding job records.
 
         Returns the workflow_id for real runs, or a plan string for dry_run.
         """
@@ -53,7 +68,10 @@ class WorkflowRunner:
             skip_set = self._compute_skip_set(start_after, stages_by_name)
 
         if dry_run:
-            return self._dry_run(config, stages_by_name, skip_set=skip_set)
+            return self._dry_run(
+                config, stages_by_name, skip_set=skip_set,
+                skipped_params=skipped_params,
+            )
 
         # Fail fast on unfilled <REQUIRED:…> placeholders
         self._validate_no_placeholders(config)
@@ -63,10 +81,17 @@ class WorkflowRunner:
         for stage in config.stages:
             stages_state[stage.name] = {"status": "pending", "remote_job_id": None, "db_job_id": None}
 
-        # Pre-mark skipped stages
+        # Pre-mark skipped stages and populate their resolved_params
         if skip_set:
             for name in skip_set:
-                stages_state[name] = {"status": "skipped_by_user", "remote_job_id": None, "db_job_id": None}
+                state: dict[str, Any] = {
+                    "status": "skipped_by_user",
+                    "remote_job_id": None,
+                    "db_job_id": None,
+                }
+                if skipped_params and name in skipped_params:
+                    state["resolved_params"] = skipped_params[name]
+                stages_state[name] = state
                 logger.info("Stage %s skipped (--start-after %s)", name, start_after)
 
         wf_id = self._db.insert_workflow(config.workflow, stages_state)
@@ -79,6 +104,7 @@ class WorkflowRunner:
         self,
         config: WorkflowConfig,
         start_after: str | None = None,
+        skipped_params: dict[str, dict[str, Any]] | None = None,
     ) -> str:
         """Start a workflow in a background process and return immediately.
 
@@ -99,7 +125,14 @@ class WorkflowRunner:
             stages_state[stage.name] = {"status": "pending", "remote_job_id": None, "db_job_id": None}
         if skip_set:
             for name in skip_set:
-                stages_state[name] = {"status": "skipped_by_user", "remote_job_id": None, "db_job_id": None}
+                ss: dict[str, Any] = {
+                    "status": "skipped_by_user",
+                    "remote_job_id": None,
+                    "db_job_id": None,
+                }
+                if skipped_params and name in skipped_params:
+                    ss["resolved_params"] = skipped_params[name]
+                stages_state[name] = ss
 
         wf_id = self._db.insert_workflow(config.workflow, stages_state)
         self._db.update_workflow(wf_id, status="pending")
@@ -214,11 +247,16 @@ class WorkflowRunner:
                             continue
 
                         try:
-                            db_job_id, remote_id = self._submit_stage(stage.name, stage)
+                            db_job_id, remote_id, resolved_params = self._submit_stage(
+                                stage.name,
+                                stage,
+                                stages_state,
+                            )
                             state["status"] = "submitted"
                             state["remote_job_id"] = remote_id
                             state["db_job_id"] = db_job_id
                             state["executor"] = stage.executor
+                            state["resolved_params"] = resolved_params
                             logger.info(
                                 "Stage %s submitted: remote_job_id=%s, db_job_id=%s",
                                 stage.name, remote_id, db_job_id,
@@ -290,6 +328,103 @@ class WorkflowRunner:
 
     # -- internal helpers ---------------------------------------------------
 
+    def _resolve_stage_params(
+        self,
+        stage: WorkflowStage,
+        stages_state: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, Any], set[str]]:
+        """Resolve a stage's effective params at submission time.
+
+        Resolution order:
+        1. Start from the stage's explicit params from config
+        2. Auto-forward missing param keys from dependency stages' resolved params
+        3. Resolve any ``<<STAGE_REF:stage:param>>`` sentinels embedded by the
+           OmegaConf ``stages`` resolver
+
+        Returns ``(resolved_params, auto_forwarded_keys)``.
+        """
+        resolved = copy.deepcopy(stage.params)
+        auto_forwarded_keys: set[str] = set()
+
+        deps = stage.depends_on or []
+        if isinstance(deps, str):
+            deps = [deps]
+
+        for dep_name in deps:
+            dep_state = stages_state.get(dep_name)
+            if not dep_state:
+                raise ValueError(
+                    f"Stage '{stage.name}' depends on unknown stage '{dep_name}'"
+                )
+            dep_params = dep_state.get("resolved_params")
+            if not isinstance(dep_params, dict):
+                raise ValueError(
+                    f"Stage '{stage.name}' cannot resolve params from dependency "
+                    f"'{dep_name}' before that stage has resolved parameters"
+                )
+            for key, value in dep_params.items():
+                if key not in resolved:
+                    resolved[key] = copy.deepcopy(value)
+                    auto_forwarded_keys.add(key)
+                    logger.debug(
+                        "Stage %s auto-forwarded param %s from dependency %s",
+                        stage.name,
+                        key,
+                        dep_name,
+                    )
+
+        def _lookup_ref(ref_stage: str, ref_param: str) -> Any:
+            ref_state = stages_state.get(ref_stage)
+            if not ref_state:
+                raise ValueError(
+                    f"Stage '{stage.name}' references unknown stage '{ref_stage}'"
+                )
+            ref_params = ref_state.get("resolved_params")
+            if not isinstance(ref_params, dict):
+                raise ValueError(
+                    f"Stage '{stage.name}' references param '{ref_param}' from "
+                    f"stage '{ref_stage}', but that stage has no resolved params yet"
+                )
+
+            current: Any = ref_params
+            for part in ref_param.split("."):
+                if not isinstance(current, dict) or part not in current:
+                    raise ValueError(
+                        f"Stage '{stage.name}' references missing param '{ref_param}' "
+                        f"from stage '{ref_stage}'"
+                    )
+                current = current[part]
+            return current
+
+        def _resolve_value(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: _resolve_value(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_resolve_value(v) for v in value]
+            if not isinstance(value, str):
+                return value
+
+            matches = list(STAGE_REF_PATTERN.finditer(value))
+            if not matches:
+                return value
+
+            if len(matches) == 1 and matches[0].span() == (0, len(value)):
+                match = matches[0]
+                return copy.deepcopy(_lookup_ref(match.group(1), match.group(2)))
+
+            def _replace(match: re.Match[str]) -> str:
+                replacement = _lookup_ref(match.group(1), match.group(2))
+                if isinstance(replacement, (dict, list)):
+                    raise ValueError(
+                        f"Stage '{stage.name}' cannot interpolate complex value "
+                        f"from '{match.group(1)}:{match.group(2)}' into a string"
+                    )
+                return str(replacement)
+
+            return STAGE_REF_PATTERN.sub(_replace, value)
+
+        return _resolve_value(resolved), auto_forwarded_keys
+
     @staticmethod
     def _compute_skip_set(
         start_after: str, stages_by_name: dict[str, WorkflowStage]
@@ -340,14 +475,27 @@ class WorkflowRunner:
             )
             raise ValueError("\n".join(lines))
 
-    def _submit_stage(self, stage_name: str, stage: WorkflowStage) -> tuple[str, str]:
-        """Submit a single stage: resolve task + executor, prepare, submit.
+    def _submit_stage(
+        self,
+        stage_name: str,
+        stage: WorkflowStage,
+        stages_state: dict[str, dict[str, Any]],
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Submit a single stage: resolve params, prepare task, submit to executor.
 
-        Returns (db_job_id, remote_job_id).
+        Returns (db_job_id, remote_job_id, resolved_params).
         """
+        resolved_params, auto_keys = self._resolve_stage_params(stage, stages_state)
+        if auto_keys:
+            logger.info(
+                "Stage %s auto-forwarded params: %s",
+                stage_name,
+                sorted(auto_keys),
+            )
+
         task_cls = get_task_class(stage.task)
         task = task_cls()
-        task_spec = task.prepare(stage.params)
+        task_spec = task.prepare(resolved_params)
 
         executor = resolve_executor(stage.executor, executors_path=self._executors_path)
         remote_id = executor.submit(task_spec)
@@ -356,7 +504,7 @@ class WorkflowRunner:
         db_job_id = self._db.insert(
             task_name=stage.task,
             executor=stage.executor,
-            parameters=stage.params,
+            parameters=resolved_params,
         )
         self._db.update_status(
             db_job_id,
@@ -364,7 +512,7 @@ class WorkflowRunner:
             remote_job_id=remote_id,
             log_path=task_spec.metadata.get("log_path"),
         )
-        return db_job_id, remote_id
+        return db_job_id, remote_id, resolved_params
 
     def _poll_job_status(self, job_id: str, executor_name: str) -> str:
         """Check the live status of a submitted job."""
@@ -385,15 +533,25 @@ class WorkflowRunner:
         config: WorkflowConfig,
         stages_by_name: dict[str, WorkflowStage],
         skip_set: set[str] | None = None,
+        skipped_params: dict[str, dict[str, Any]] | None = None,
     ) -> str:
-        """Print the full execution plan without submitting anything."""
+        """Print the full execution plan without submitting anything.
+
+        Simulates cross-stage param resolution so the preview shows the
+        actual values that each stage would receive.
+        """
         skip_set = skip_set or set()
+        skipped_params = skipped_params or {}
         timeout_h = config.timeout / 3600
         lines = [
             f"Workflow: {config.workflow}",
             f"Timeout: {config.timeout:.0f}s ({timeout_h:.0f}h)",
             "",
         ]
+
+        # Simulated stages_state for progressive param resolution
+        sim_state: dict[str, dict[str, Any]] = {}
+
         will_run_count = 0
         for i, stage in enumerate(config.stages, 1):
             skipped = stage.name in skip_set
@@ -405,21 +563,55 @@ class WorkflowRunner:
             if isinstance(deps, str):
                 deps = [deps]
             lines.append(f"  Depends on: {', '.join(deps) if deps else '(none)'}")
+
             if skipped:
+                # Populate resolved_params for skipped stages so downstream
+                # cross-stage refs can resolve during dry-run simulation
+                if stage.name in skipped_params:
+                    sim_state[stage.name] = {
+                        "status": "skipped_by_user",
+                        "resolved_params": skipped_params[stage.name],
+                    }
+                else:
+                    # Use the stage's config params as best-effort simulation
+                    sim_state[stage.name] = {
+                        "status": "skipped_by_user",
+                        "resolved_params": stage.params,
+                    }
                 lines.append("")
                 continue
+
             will_run_count += 1
+
+            # Simulate param resolution
+            try:
+                resolved_params, auto_keys = self._resolve_stage_params(stage, sim_state)
+                sim_state[stage.name] = {
+                    "status": "completed",
+                    "resolved_params": resolved_params,
+                }
+            except ValueError:
+                # Resolution failed (e.g. missing dep params) — fall back to raw params
+                resolved_params = stage.params
+                auto_keys = set()
+                sim_state[stage.name] = {
+                    "status": "completed",
+                    "resolved_params": stage.params,
+                }
+
             task_cls = get_task_class(stage.task)
             task = task_cls()
-            task_spec = task.prepare(stage.params)
+            task_spec = task.prepare(resolved_params)
             lines.append(f"  Working dir: {task_spec.working_dir or '(default)'}")
-            # Show key params (up to 5)
-            if stage.params:
-                param_items = list(stage.params.items())[:5]
-                param_str = ", ".join(f"{k}={v}" for k, v in param_items)
-                if len(stage.params) > 5:
-                    param_str += f", ... (+{len(stage.params) - 5} more)"
-                lines.append(f"  Params: {param_str}")
+            # Show key params (up to 8)
+            if resolved_params:
+                param_items = list(resolved_params.items())[:8]
+                for k, v in param_items:
+                    suffix = " [auto]" if k in auto_keys else ""
+                    lines.append(f"    {k}={v}{suffix}")
+                remaining = len(resolved_params) - 8
+                if remaining > 0:
+                    lines.append(f"    ... (+{remaining} more)")
             lines.append(f"  Command preview (first 500 chars):")
             lines.append(f"    {task_spec.command[:500]}")
             lines.append("")
@@ -451,12 +643,13 @@ class WorkflowRunner:
             )
         job_params = record.params_dict
 
-        # Map task-specific param names → workflow-level param names
+        # Map task-specific param names → workflow-level param names.
+        # output_dir is omitted — it is derived within the inference stage
+        # and propagated via cross-stage references, not as a top-level param.
         _PARAM_MAPPING: dict[str, str] = {
             "model_name": "params.model_name",
             "dataset": "params.dataset",
             "split": "params.split",
-            "output_dir": "params.output_dir",
             "working_dir": "params.working_dir",
             "run_name": "params.run_name",
         }

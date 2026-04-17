@@ -261,7 +261,7 @@ class TestWorkflowSimulationStartAfter:
         runner = WorkflowRunner(db_path=tmp_path / "sim_test.db")
 
         with patch.object(runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id")
+            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
             with patch.object(runner, "_poll_job_status", return_value="completed"):
                 wf_id = runner.run(
                     swe_bench_three_stage_config, start_after="inference"
@@ -389,3 +389,219 @@ class TestWorkflowSimulationStartAfter:
         inf_ds_dir = derive_ds_dir(inf_params["dataset"], inf_params["split"])
         col_ds_dir = derive_ds_dir(col_params["dataset"], col_params["split"])
         assert inf_ds_dir == col_ds_dir
+
+
+class TestCrossStageRefSimulation:
+    """Simulation tests for the cross-stage reference mechanism.
+
+    These verify the full param flow through a 3-stage workflow where
+    downstream stages use ${stages:...} refs and auto-forwarded params.
+    """
+
+    def test_three_stage_cross_stage_resolution(self, tmp_path):
+        """Full 3-stage simulation: inference → collect → evaluate with cross-stage refs."""
+        from unittest.mock import patch, MagicMock
+        from devrun.workflow import WorkflowRunner
+
+        runner = WorkflowRunner(db_path=tmp_path / "cross_stage_sim.db")
+
+        cfg = WorkflowConfig(
+            workflow="swe_bench_cross",
+            stages=[
+                WorkflowStage(
+                    name="inference",
+                    task="swe_bench_agentic",
+                    executor="slurm",
+                    params={
+                        "model_name": "gpt-4",
+                        "dataset": "/data/SWE-bench_Verified",
+                        "split": "test",
+                        "run_name": "run1",
+                        "output_dir": "logs/run1",
+                        "working_dir": "/remote/project",
+                        "max_iterations": 100,
+                        "llm_config": "/fake/config.json",
+                        "max_attempts": 5,
+                        "array": "000-499",
+                        "concurrency_limit": 10,
+                    },
+                ),
+                WorkflowStage(
+                    name="collect",
+                    task="swe_bench_collect",
+                    executor="ssh",
+                    depends_on="inference",
+                    params={
+                        # Explicit cross-stage refs
+                        "model_name_or_path": "<<STAGE_REF:inference:model_name>>",
+                        "predictions_path": "<<STAGE_REF:inference:output_dir>>/predictions.jsonl",
+                        # output_dir, dataset, split, working_dir: auto-forwarded
+                    },
+                ),
+                WorkflowStage(
+                    name="evaluate",
+                    task="swe_bench_eval",
+                    executor="slurm",
+                    depends_on="collect",
+                    params={
+                        "dataset_name": "<<STAGE_REF:inference:dataset>>",
+                        "predictions_path": "<<STAGE_REF:collect:predictions_path>>",
+                        # working_dir: auto-forwarded
+                        "mem": "64G",
+                        "cpus_per_task": 32,
+                        "max_workers": 32,
+                    },
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+
+        submitted_stages: list[tuple[str, dict]] = []
+
+        def fake_submit(stage_name, stage, stages_state):
+            resolved, _ = runner._resolve_stage_params(stage, stages_state)
+            submitted_stages.append((stage_name, resolved))
+            return ("db_id", f"remote_{stage_name}", resolved)
+
+        with patch.object(runner, "_submit_stage", side_effect=fake_submit):
+            with patch.object(runner, "_poll_job_status", return_value="completed"):
+                wf_id = runner.run(cfg)
+
+        # All 3 stages submitted in order
+        assert [s[0] for s in submitted_stages] == ["inference", "collect", "evaluate"]
+
+        # --- inference stage ---
+        inf_params = submitted_stages[0][1]
+        assert inf_params["model_name"] == "gpt-4"
+        assert inf_params["output_dir"] == "logs/run1"
+        assert inf_params["dataset"] == "/data/SWE-bench_Verified"
+
+        # --- collect stage ---
+        col_params = submitted_stages[1][1]
+        # Cross-stage refs resolved
+        assert col_params["model_name_or_path"] == "gpt-4"
+        assert col_params["predictions_path"] == "logs/run1/predictions.jsonl"
+        # Auto-forwarded from inference
+        assert col_params["output_dir"] == "logs/run1"
+        assert col_params["dataset"] == "/data/SWE-bench_Verified"
+        assert col_params["split"] == "test"
+        assert col_params["working_dir"] == "/remote/project"
+
+        # --- evaluate stage ---
+        eval_params = submitted_stages[2][1]
+        # Cross-stage refs resolved
+        assert eval_params["dataset_name"] == "/data/SWE-bench_Verified"
+        assert eval_params["predictions_path"] == "logs/run1/predictions.jsonl"
+        # Auto-forwarded through collect (which got it from inference)
+        assert eval_params["working_dir"] == "/remote/project"
+        # Explicit params preserved
+        assert eval_params["mem"] == "64G"
+        assert eval_params["cpus_per_task"] == 32
+
+        # Workflow completed
+        record = runner._db.get_workflow(wf_id)
+        assert record["status"] == "completed"
+
+    def test_cross_stage_with_skipped_inference(self, tmp_path):
+        """When inference is skipped via --start-after, collect still resolves refs."""
+        from unittest.mock import patch
+        from devrun.workflow import WorkflowRunner
+
+        runner = WorkflowRunner(db_path=tmp_path / "skip_sim.db")
+
+        cfg = WorkflowConfig(
+            workflow="swe_bench_skip",
+            stages=[
+                WorkflowStage(
+                    name="inference",
+                    task="swe_bench_agentic",
+                    executor="slurm",
+                    params={"model_name": "gpt-4", "output_dir": "logs/run1"},
+                ),
+                WorkflowStage(
+                    name="collect",
+                    task="swe_bench_collect",
+                    executor="ssh",
+                    depends_on="inference",
+                    params={
+                        "model_name_or_path": "<<STAGE_REF:inference:model_name>>",
+                        "predictions_path": "<<STAGE_REF:inference:output_dir>>/pred.jsonl",
+                    },
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+
+        skipped_params = {
+            "inference": {
+                "model_name": "gpt-4-turbo",
+                "output_dir": "/existing/logs/turbo_run",
+                "dataset": "/data/swe",
+                "split": "test",
+                "working_dir": "/remote/project",
+            },
+        }
+
+        submitted_stages: list[tuple[str, dict]] = []
+
+        def fake_submit(stage_name, stage, stages_state):
+            resolved, _ = runner._resolve_stage_params(stage, stages_state)
+            submitted_stages.append((stage_name, resolved))
+            return ("db_id", f"remote_{stage_name}", resolved)
+
+        with patch.object(runner, "_submit_stage", side_effect=fake_submit):
+            with patch.object(runner, "_poll_job_status", return_value="completed"):
+                runner.run(
+                    cfg,
+                    start_after="inference",
+                    skipped_params=skipped_params,
+                )
+
+        # Only collect submitted (inference skipped)
+        assert len(submitted_stages) == 1
+        assert submitted_stages[0][0] == "collect"
+
+        col_params = submitted_stages[0][1]
+        # Cross-stage refs resolved from skipped stage's params
+        assert col_params["model_name_or_path"] == "gpt-4-turbo"
+        assert col_params["predictions_path"] == "/existing/logs/turbo_run/pred.jsonl"
+        # Auto-forwarded from skipped stage
+        assert col_params["dataset"] == "/data/swe"
+        assert col_params["working_dir"] == "/remote/project"
+
+    def test_dry_run_with_cross_stage_refs(self, tmp_path):
+        """Dry-run should simulate cross-stage resolution and show resolved values."""
+        from devrun.workflow import WorkflowRunner
+
+        runner = WorkflowRunner(db_path=tmp_path / "dry_run_sim.db")
+
+        cfg = WorkflowConfig(
+            workflow="test_dry",
+            stages=[
+                WorkflowStage(
+                    name="step1",
+                    task="eval",
+                    executor="local",
+                    params={"output_dir": "/logs/run1", "model": "gpt-4"},
+                ),
+                WorkflowStage(
+                    name="step2",
+                    task="eval",
+                    executor="local",
+                    depends_on="step1",
+                    params={
+                        "path": "<<STAGE_REF:step1:output_dir>>/data.json",
+                    },
+                ),
+            ],
+            heartbeat_interval=0.001,
+        )
+
+        result = runner.run(cfg, dry_run=True)
+
+        # Resolved value should appear in the output
+        assert "/logs/run1/data.json" in result
+        # Sentinel should not appear in the output
+        assert "<<STAGE_REF" not in result
+        # Auto-forwarded params should be annotated
+        assert "[auto]" in result
