@@ -239,17 +239,31 @@ def run(
     overrides = []
     resolved = OmegaConf.to_container(raw_cfg, resolve=True)
     
-    # Delegate to existing runner.run() with resolved config dict
-    # (runner.run() expects target + override list, so we need to refactor
-    #  or introduce runner.run_from_dict())
-    ...
+    # Convert resolved config to override list format
+    # The existing runner.run() can handle this via the overrides parameter
+    overrides_list = []
+    for key, value in resolved.get("params", {}).items():
+        overrides_list.append(f"params.{key}={value}")
+    
+    job_ids = runner.run(target, overrides=overrides_list, dry_run=dry_run)
+    
+    for job_id in job_ids:
+        console.print(f"[green]✓[/green] Job submitted: {job_id}")
 ```
 
-**Note:** The existing `TaskRunner.run()` signature expects `target` + `overrides` list. We have two options:
-1. Refactor to accept pre-merged OmegaConf config
-2. Convert the merged config back to override list (less clean)
+**Implementation Note:** The existing `TaskRunner.run()` already handles the full merge via `_load_config()`, which calls `load_merged_config()`. We need to **bypass** `_load_config()` when `--from-job` is used, since we've already done the merge in the CLI layer.
 
-**Recommendation:** Add `TaskRunner.run_from_config(cfg_dict, dry_run)` that accepts a resolved config dict and bypasses the `_load_config` step.
+**Solution:** Add a private `TaskRunner._run_from_merged_config()` method that skips `_load_config()` and goes straight to sweep expansion + submission:
+
+```python
+def _run_from_merged_config(self, cfg_dict: dict, dry_run: bool = False) -> list[str]:
+    """Internal: run with pre-merged config dict, bypassing _load_config()."""
+    cfg = TaskConfig(**cfg_dict)
+    param_combos = self._expand_sweep(cfg)
+    # ... rest of run() logic
+```
+
+The CLI `run()` command will call `_run_from_merged_config()` when `--from-job` is used, otherwise delegates to the existing `run()` method.
 
 ## Testing Plan
 
