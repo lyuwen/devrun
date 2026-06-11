@@ -148,6 +148,53 @@ class TestWorkflowRunner:
         # Must exit promptly — not spin until the 600s timeout
         assert elapsed < 5.0
 
+    def test_executor_cancelled_status_transitions_stage(self, workflow_runner):
+        """When executor.status() reports 'cancelled', the heartbeat loop must
+        flip the stage to cancelled and mark the workflow failed — not loop
+        until timeout."""
+        import time
+        from unittest.mock import patch
+
+        cfg = WorkflowConfig(
+            workflow="exec_cancel_test",
+            stages=[WorkflowStage(name="s1", task="eval", executor="local")],
+            timeout=600,
+            heartbeat_interval=0.001,
+        )
+        # Stage is currently running with a remote_job_id; the executor will
+        # report "cancelled" on the next poll.
+        stages_state = {
+            "s1": {
+                "status": "running",
+                "remote_job_id": "remote_1",
+                "db_job_id": None,
+                "executor": "local",
+            },
+        }
+        wf_id = workflow_runner._db.insert_workflow("exec_cancel_test", stages_state)
+        workflow_runner._db.update_workflow(wf_id, status="running")
+
+        with patch.object(workflow_runner, "_poll_job_status", return_value="cancelled"):
+            start = time.monotonic()
+            result = workflow_runner._heartbeat_loop(wf_id, cfg, stages_state)
+            elapsed = time.monotonic() - start
+
+        assert stages_state["s1"]["status"] == "cancelled"
+        record = workflow_runner._db.get_workflow(result)
+        assert record["status"] == "failed"
+        assert elapsed < 5.0
+
+    def test_poll_job_status_maps_cancelled(self, workflow_runner):
+        """_poll_job_status must map executor 'cancelled'/'canceled' to 'cancelled'."""
+        from unittest.mock import patch, MagicMock
+
+        for raw in ("cancelled", "CANCELLED", "canceled"):
+            with patch("devrun.workflow.resolve_executor") as mock_resolve:
+                mock_exec = MagicMock()
+                mock_exec.status.return_value = raw
+                mock_resolve.return_value = mock_exec
+                assert workflow_runner._poll_job_status("j", "local") == "cancelled"
+
     def test_cancel_nonexistent_raises(self, workflow_runner):
         with pytest.raises(ValueError, match="not found"):
             workflow_runner.cancel("nonexistent")

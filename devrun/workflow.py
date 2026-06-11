@@ -289,6 +289,16 @@ class WorkflowRunner:
                                     db_jid, JobStatus.FAILED,
                                     completed_at=datetime.now(timezone.utc),
                                 )
+                        elif poll_status == "cancelled":
+                            state["status"] = "cancelled"
+                            any_failed = True
+                            logger.warning("Stage %s cancelled", stage.name)
+                            db_jid = state.get("db_job_id")
+                            if db_jid:
+                                self._db.update_status(
+                                    db_jid, JobStatus.CANCELLED,
+                                    completed_at=datetime.now(timezone.utc),
+                                )
                         elif poll_status == "running":
                             state["status"] = "running"
 
@@ -522,6 +532,8 @@ class WorkflowRunner:
         status_lower = raw_status.lower()
         if status_lower in ("completed", "complete", "done"):
             return "completed"
+        if status_lower in ("cancelled", "canceled"):
+            return "cancelled"
         if status_lower in ("failed", "error", "timeout", "out_of_memory"):
             return "failed"
         if status_lower in ("running", "pending", "submitted", "configuring"):

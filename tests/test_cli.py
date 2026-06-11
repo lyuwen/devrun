@@ -895,6 +895,96 @@ stages:
                             assert sp["inference"]["model"] == "gpt-4"
                             assert sp["inference"]["output_dir"] == "/logs/run1"
 
+    def test_workflow_run_from_job_with_explicit_start_after_seeds_params(self, tmp_path):
+        """When --start-after is provided explicitly, --from-job must still
+        seed skipped_params for the stage whose task matches the source job —
+        otherwise downstream ${stages:inference,...} refs lose the real
+        output_dir from the source job record."""
+        config_text = """\
+workflow: test_wf
+params:
+  model: gpt-4
+stages:
+  - name: inference
+    task: swe_bench_agentic
+    executor: slurm
+    params:
+      model: "${params.model}"
+  - name: collect
+    task: swe_bench_collect
+    executor: ssh
+    depends_on: inference
+    params:
+      path: "${stages:inference,output_dir}"
+  - name: evaluate
+    task: swe_bench_eval
+    executor: slurm
+    depends_on: collect
+    params:
+      preds: "${stages:inference,output_dir}/predictions.jsonl"
+"""
+        cfg_path = tmp_path / "wf.yaml"
+        cfg_path.write_text(config_text)
+
+        from omegaconf import OmegaConf
+        if not OmegaConf.has_resolver("stages"):
+            OmegaConf.register_new_resolver(
+                "stages",
+                lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+            )
+
+        from devrun.models import JobRecord, JobStatus
+
+        mock_job = JobRecord(
+            job_id="j1",
+            task_name="swe_bench_agentic",
+            executor="slurm",
+            parameters='{"model": "gpt-4", "output_dir": "/logs/real_run"}',
+            status=JobStatus.COMPLETED,
+        )
+
+        with patch("devrun.runner.find_configs", return_value=[cfg_path]):
+            with patch(
+                "devrun.workflow.WorkflowRunner.extract_workflow_params",
+                return_value=({"params.model": "gpt-4"}, "swe_bench_agentic", "j1"),
+            ):
+                with patch(
+                    "devrun.workflow.WorkflowRunner.detect_stage_for_task",
+                    return_value="inference",
+                ):
+                    with patch(
+                        "devrun.db.jobs.JobStore.get",
+                        return_value=mock_job,
+                    ):
+                        with patch(
+                            "devrun.workflow.WorkflowRunner.run",
+                            return_value="wf_789",
+                        ) as mock_run:
+                            runner = get_cli_runner()
+                            result = runner.invoke(
+                                app,
+                                [
+                                    "workflow", "run", "my_workflow",
+                                    "--from-job", "j1",
+                                    "--start-after", "collect",
+                                ],
+                            )
+
+                            assert result.exit_code == 0
+                            assert mock_run.called
+                            call_kwargs = mock_run.call_args[1]
+                            # User asked to start after 'collect' (transitive
+                            # skip = {collect, inference}) — both upstream
+                            # stages skipped, and inference must carry the
+                            # source job's real output_dir.
+                            assert call_kwargs.get("start_after") == "collect"
+                            sp = call_kwargs.get("skipped_params") or {}
+                            assert "inference" in sp, (
+                                "inference skipped_params should be seeded from --from-job "
+                                "even when --start-after is explicit"
+                            )
+                            assert sp["inference"]["output_dir"] == "/logs/real_run"
+
     def test_workflow_help_shows_cross_stage_refs(self, tmp_path):
         """Workflow help should render cross-stage refs readably."""
         mock_config = {

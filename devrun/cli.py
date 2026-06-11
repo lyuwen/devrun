@@ -696,18 +696,30 @@ def workflow_run(
         console.print(f"[red]Error parsing workflow config:[/red] {exc}")
         raise typer.Exit(code=1)
 
-    # Auto-detect stage to skip when --from-job is used without --start-after
-    if from_job and not start_after and task_name is not None:
-        detected_stage = runner.detect_stage_for_task(task_name, cfg)
-        if detected_stage:
-            start_after = detected_stage
-            record = runner._db.get(from_job)
-            if record is not None:
-                skipped_params[detected_stage] = record.params_dict
-            console.print(
-                f"[dim]Auto-detected: skipping stage '{detected_stage}' "
-                f"based on job task type '{task_name}'[/dim]"
-            )
+    # Auto-detect stage to skip when --from-job is used without --start-after,
+    # and populate skipped-stage resolved_params from the source job so that
+    # downstream ${stages:X,...} references resolve correctly regardless of
+    # whether --start-after was supplied explicitly or auto-detected.
+    if from_job and task_name is not None:
+        if not start_after:
+            detected_stage = runner.detect_stage_for_task(task_name, cfg)
+            if detected_stage:
+                start_after = detected_stage
+                console.print(
+                    f"[dim]Auto-detected: skipping stage '{detected_stage}' "
+                    f"based on job task type '{task_name}'[/dim]"
+                )
+
+        # Find the stage whose task matches the source job; if the user gave
+        # an explicit --start-after for a different stage, we only seed
+        # skipped_params when the source-task stage is actually in the skip
+        # set (otherwise the params would belong to a stage that still runs).
+        if start_after:
+            source_stage = runner.detect_stage_for_task(task_name, cfg)
+            if source_stage:
+                record = runner._db.get(from_job)
+                if record is not None:
+                    skipped_params[source_stage] = record.params_dict
 
     try:
         if detach:
