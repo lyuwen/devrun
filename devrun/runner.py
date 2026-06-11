@@ -20,6 +20,11 @@ from devrun.router import resolve_executor, load_executor_configs
 logger = logging.getLogger("devrun.runner")
 
 
+def _is_negative_index(s: str) -> bool:
+    """True iff *s* is a string like ``"-1"``, ``"-12"`` (negative integer)."""
+    return len(s) > 1 and s[0] == "-" and s[1:].isdigit() and int(s) < 0
+
+
 def get_config_dirs() -> list[Path]:
     """Return the ordered list of config search directories (lowest → highest priority)."""
     devrun_repo_root = Path(__file__).parent.parent
@@ -221,6 +226,67 @@ class TaskRunner:
             raise ValueError(f"Job {job_id} not found")
         params = record.params_dict
         return self._submit_single(record.task_name, record.executor, params)
+
+    def extract_task_params(
+        self, job_id: str, target_task: str
+    ) -> tuple[dict[str, Any], str, str]:
+        """Translate params from an existing job into ``target_task``'s schema.
+
+        *job_id* may be either a literal job ID or a negative integer string
+        ``"-N"`` selecting the N-th most recent job whose task type is
+        accepted by ``target_task.import_from_job`` (newest = ``-1``).
+        Delegates to the target task class's :meth:`BaseTask.import_from_job`
+        hook.  Returns ``(imported_params, source_task_name, resolved_job_id)``.
+        Raises :class:`ValueError` when the job is unknown or the target task
+        does not support importing from the source task type.
+        """
+        task_cls = get_task_class(target_task)
+
+        if _is_negative_index(job_id):
+            n = -int(job_id)
+            matches: list[tuple[Any, dict[str, Any]]] = []
+            for rec in self._db.list_all():
+                try:
+                    imported = task_cls.import_from_job(rec.task_name, rec.params_dict)
+                except Exception as exc:
+                    logger.debug(
+                        "Skipping job %s while resolving %s: import_from_job raised %s",
+                        rec.job_id, job_id, exc,
+                    )
+                    continue
+                if imported:
+                    matches.append((rec, imported))
+                    if len(matches) >= n:
+                        break
+            if len(matches) < n:
+                raise ValueError(
+                    f"Cannot resolve --from-job {job_id}: only {len(matches)} "
+                    f"job(s) in history can be imported into '{target_task}'."
+                )
+            record, imported = matches[n - 1]
+            logger.info(
+                "Resolved --from-job %s → %s (%s)",
+                job_id, record.job_id, record.task_name,
+            )
+        else:
+            record = self._db.get(job_id)
+            if record is None:
+                raise ValueError(
+                    f"Job '{job_id}' not found. Use `devrun history` to find job IDs."
+                )
+            imported = task_cls.import_from_job(record.task_name, record.params_dict)
+            if not imported:
+                raise ValueError(
+                    f"Task '{target_task}' does not support importing from "
+                    f"source task '{record.task_name}' (job {job_id})."
+                )
+
+        logger.info(
+            "Imported %d params from job %s (%s → %s): %s",
+            len(imported), record.job_id, record.task_name, target_task,
+            list(imported.keys()),
+        )
+        return imported, record.task_name, record.job_id
 
     def cancel(self, job_id: str) -> None:
         """Cancel a running job."""

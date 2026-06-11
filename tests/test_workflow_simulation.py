@@ -361,7 +361,7 @@ class TestWorkflowSimulationStartAfter:
         cfg_path.write_text(_yaml.dump(template_yaml))
 
         # Simulate CLI flow: extract params → merge → resolve
-        dotlist, task_name = runner.extract_workflow_params(job_id)
+        dotlist, task_name, _ = runner.extract_workflow_params(job_id)
         assert task_name == "swe_bench_agentic"
         assert dotlist["params.model_name"] == "gpt-4o"
 

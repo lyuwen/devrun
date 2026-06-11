@@ -372,6 +372,100 @@ class TestRunnerRerun:
             assert "not found" in str(exc_info.value)
 
 
+class TestRunnerExtractTaskParams:
+    """Tests for TaskRunner.extract_task_params (--from-job translation)."""
+
+    def test_extract_unknown_job_raises(self, executors_yaml, temp_dir):
+        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
+            runner = TaskRunner(
+                executors_path=str(executors_yaml),
+                db_path=str(temp_dir / "jobs.db"),
+            )
+            with pytest.raises(ValueError, match="not found"):
+                runner.extract_task_params("nope", "swe_bench_collect")
+
+    def test_extract_from_agentic_to_collect(self, executors_yaml, temp_dir):
+        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
+            runner = TaskRunner(
+                executors_path=str(executors_yaml),
+                db_path=str(temp_dir / "jobs.db"),
+            )
+            job_id = runner._db.insert(
+                "swe_bench_agentic",
+                "slurm",
+                {
+                    "output_dir": "logs/abc",
+                    "dataset": "/data/SWE",
+                    "split": "test",
+                    "model_name": "gpt-x",
+                    "working_dir": "/proj",
+                },
+            )
+            imported, src_task, resolved_id = runner.extract_task_params(job_id, "swe_bench_collect")
+            assert src_task == "swe_bench_agentic"
+            assert resolved_id == job_id
+            assert imported["output_dir"] == "logs/abc"
+            assert imported["model_name_or_path"] == "gpt-x"
+            assert imported["dataset"] == "/data/SWE"
+
+    def test_extract_unsupported_pair_raises(self, executors_yaml, temp_dir):
+        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
+            runner = TaskRunner(
+                executors_path=str(executors_yaml),
+                db_path=str(temp_dir / "jobs.db"),
+            )
+            job_id = runner._db.insert("eval", "local", {"foo": "bar"})
+            with pytest.raises(ValueError, match="does not support importing"):
+                runner.extract_task_params(job_id, "swe_bench_collect")
+
+    def test_extract_negative_index_picks_latest_compatible(self, executors_yaml, temp_dir):
+        """`-1` should resolve to the most recent job that the target can import."""
+        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
+            runner = TaskRunner(
+                executors_path=str(executors_yaml),
+                db_path=str(temp_dir / "jobs.db"),
+            )
+            agentic_old = runner._db.insert(
+                "swe_bench_agentic", "slurm",
+                {"output_dir": "logs/old", "model_name": "m-old"},
+            )
+            # Insert an unrelated job in between — should be skipped
+            runner._db.insert("eval", "local", {"foo": "bar"})
+            agentic_new = runner._db.insert(
+                "swe_bench_agentic", "slurm",
+                {"output_dir": "logs/new", "model_name": "m-new"},
+            )
+            imp, src, rid = runner.extract_task_params("-1", "swe_bench_collect")
+            assert rid == agentic_new
+            assert imp["model_name_or_path"] == "m-new"
+
+            imp2, _, rid2 = runner.extract_task_params("-2", "swe_bench_collect")
+            assert rid2 == agentic_old
+            assert imp2["model_name_or_path"] == "m-old"
+
+    def test_extract_negative_index_too_deep(self, executors_yaml, temp_dir):
+        """`-N` beyond available compatible jobs should raise."""
+        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
+            runner = TaskRunner(
+                executors_path=str(executors_yaml),
+                db_path=str(temp_dir / "jobs.db"),
+            )
+            runner._db.insert("swe_bench_agentic", "slurm", {"model_name": "m"})
+            with pytest.raises(ValueError, match="only 1 job"):
+                runner.extract_task_params("-3", "swe_bench_collect")
+
+    def test_extract_negative_index_no_match(self, executors_yaml, temp_dir):
+        """`-1` with no compatible job in history should raise."""
+        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
+            runner = TaskRunner(
+                executors_path=str(executors_yaml),
+                db_path=str(temp_dir / "jobs.db"),
+            )
+            runner._db.insert("eval", "local", {"foo": "bar"})
+            with pytest.raises(ValueError, match="only 0 job"):
+                runner.extract_task_params("-1", "swe_bench_collect")
+
+
 class TestMapStatus:
     """Tests for TaskRunner._map_status method."""
 

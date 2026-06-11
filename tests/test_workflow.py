@@ -454,7 +454,7 @@ class TestWorkflowFromJob:
             parameters=job_params,
         )
 
-        dotlist, task_name = workflow_runner.extract_workflow_params(job_id)
+        dotlist, task_name, _ = workflow_runner.extract_workflow_params(job_id)
         assert task_name == "swe_bench_agentic"
         assert dotlist["params.model_name"] == "test-model"
         assert dotlist["params.output_dir"] == "logs/test_run"
@@ -465,6 +465,40 @@ class TestWorkflowFromJob:
         """extract_workflow_params with an invalid job_id should raise ValueError."""
         with pytest.raises(ValueError, match="not found"):
             workflow_runner.extract_workflow_params("nonexistent_job_id")
+
+    def test_extract_workflow_params_negative_index(self, workflow_runner):
+        """`-1` resolves to the latest job; `-2` to the one before."""
+        first = workflow_runner._db.insert(
+            task_name="swe_bench_agentic",
+            executor="slurm",
+            parameters={"model_name": "m-old", "dataset": "/d"},
+        )
+        second = workflow_runner._db.insert(
+            task_name="swe_bench_agentic",
+            executor="slurm",
+            parameters={"model_name": "m-new", "dataset": "/d"},
+        )
+        _, _, rid = workflow_runner.extract_workflow_params("-1")
+        assert rid == second
+        _, _, rid2 = workflow_runner.extract_workflow_params("-2")
+        assert rid2 == first
+
+    def test_extract_workflow_params_negative_index_filtered(self, workflow_runner):
+        """`allowed_source_tasks` should skip jobs whose task is not in the set."""
+        workflow_runner._db.insert("eval", "local", {"foo": "bar"})  # newest, but excluded
+        agentic = workflow_runner._db.insert(
+            "swe_bench_agentic", "slurm", {"model_name": "m"}
+        )
+        _, task_name, rid = workflow_runner.extract_workflow_params(
+            "-1", allowed_source_tasks={"swe_bench_agentic"}
+        )
+        assert rid == agentic
+        assert task_name == "swe_bench_agentic"
+
+    def test_extract_workflow_params_negative_index_too_deep(self, workflow_runner):
+        workflow_runner._db.insert("swe_bench_agentic", "slurm", {"model_name": "m"})
+        with pytest.raises(ValueError, match="only 1 job"):
+            workflow_runner.extract_workflow_params("-5")
 
     def test_extract_workflow_params_omits_empty_values(self, workflow_runner):
         """extract_workflow_params should skip params with empty/falsy values."""
@@ -478,7 +512,7 @@ class TestWorkflowFromJob:
             executor="slurm",
             parameters=job_params,
         )
-        dotlist, _ = workflow_runner.extract_workflow_params(job_id)
+        dotlist, _, _ = workflow_runner.extract_workflow_params(job_id)
         assert "params.model_name" in dotlist
         assert "params.output_dir" in dotlist
         assert "params.dataset" not in dotlist  # empty string skipped

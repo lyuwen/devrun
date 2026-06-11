@@ -136,16 +136,20 @@ def _show_task_help(target: str, ctx: typer.Context) -> None:
 def run(
     ctx: typer.Context,
     target: Optional[str] = typer.Argument(
-        None, 
+        None,
         help="Config path, task, or task/variation",
         autocompletion=complete_target
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Prepare job without actually executing it"),
+    from_job: Optional[str] = typer.Option(
+        None, "--from-job",
+        help="Import params from an existing job (e.g. swe_bench_collect --from-job <agentic_job_id>)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
     """Submit a task using a config file or variation. Trailing arguments are passed as OmegaConf overrides."""
-    
+
     # Handle help manually so we can show task-specific help
     if help:
         if not target:
@@ -156,20 +160,46 @@ def run(
             # Show task-specific help using its configuration template
             _show_task_help(target, ctx)
             raise typer.Exit()
-            
+
     if not target:
         console.print("[red]Missing argument 'TARGET'.[/red]\n")
         console.print(ctx.get_help())
         raise typer.Exit(code=2)
-        
+
     _setup_logging(verbose)
     runner = _runner()
-    
-    # Any trailing arguments will be passed as overrides
-    overrides = ctx.args
-    if overrides:
-        console.print(f"[dim]Using overrides: {overrides}[/dim]")
-        
+
+    # Merge order: YAML base → from-job imported params → CLI trailing overrides.
+    # Imported params are converted to dotlist entries and prepended so that
+    # any matching CLI override wins.
+    overrides: list[str] = []
+
+    if from_job:
+        # Resolve target → task name to drive the import hook.
+        try:
+            task_name = runner._load_config(target).task
+        except FileNotFoundError:
+            console.print(f"[red]Error:[/red] No config found for target '{target}'.")
+            raise typer.Exit(code=1)
+        except Exception as exc:
+            console.print(f"[red]Failed to load configuration for '{target}':[/red] {exc}")
+            raise typer.Exit(code=1)
+        try:
+            imported, source_task, resolved_job_id = runner.extract_task_params(
+                from_job, task_name
+            )
+        except ValueError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[dim]From job {resolved_job_id} ({source_task}): {list(imported.keys())}[/dim]"
+        )
+        overrides.extend(f"params.{k}={v}" for k, v in imported.items())
+
+    if ctx.args:
+        console.print(f"[dim]Using overrides: {ctx.args}[/dim]")
+        overrides.extend(ctx.args)
+
     try:
         job_ids = runner.run(target, overrides=overrides, dry_run=dry_run)
         if dry_run:
@@ -620,13 +650,24 @@ def workflow_run(
             raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.load(extra_path))
 
         if from_job:
+            # Peek at the raw config's stage tasks so negative-index lookups
+            # filter to history entries this workflow can actually consume.
+            allowed_tasks: set[str] = set()
+            raw_stages = OmegaConf.to_container(raw_cfg, resolve=False).get("stages", [])
+            if isinstance(raw_stages, list):
+                for st in raw_stages:
+                    if isinstance(st, dict) and st.get("task"):
+                        allowed_tasks.add(str(st["task"]))
             try:
-                job_params, task_name = runner.extract_workflow_params(from_job)
+                job_params, task_name, resolved_job_id = runner.extract_workflow_params(
+                    from_job, allowed_source_tasks=allowed_tasks or None
+                )
             except ValueError as exc:
                 console.print(f"[red]Error:[/red] {exc}")
                 raise typer.Exit(code=1)
+            from_job = resolved_job_id  # propagate resolved ID downstream
             if job_params:
-                console.print(f"[dim]From job {from_job}: {list(job_params.keys())}[/dim]")
+                console.print(f"[dim]From job {resolved_job_id} ({task_name}): {list(job_params.keys())}[/dim]")
                 job_overrides = [f"{k}={v}" for k, v in job_params.items()]
                 raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.from_dotlist(job_overrides))
 

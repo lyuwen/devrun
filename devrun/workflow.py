@@ -626,21 +626,60 @@ class WorkflowRunner:
 
     # -- public query methods ------------------------------------------------
 
-    def extract_workflow_params(self, job_id: str) -> tuple[dict[str, str], str]:
+    def extract_workflow_params(
+        self,
+        job_id: str,
+        allowed_source_tasks: set[str] | None = None,
+    ) -> tuple[dict[str, str], str, str]:
         """Extract workflow-level params from an existing job record.
 
-        Returns (dotlist_dict, task_name) where dotlist_dict has keys like
-        ``"params.model_name"`` suitable for OmegaConf merging.
+        *job_id* may be either a literal job ID or a negative integer string
+        ``"-N"`` selecting the N-th most recent job (newest = ``-1``).  When
+        *allowed_source_tasks* is provided and *job_id* is a negative index,
+        only jobs whose ``task_name`` is in that set are considered — this
+        lets the workflow runner skip unrelated jobs in history.
+
+        Returns ``(dotlist_dict, task_name, resolved_job_id)`` where
+        ``dotlist_dict`` has keys like ``"params.model_name"`` suitable for
+        OmegaConf merging.
 
         Mapping priority: explicit _PARAM_MAPPING entries take precedence
         (allowing key renaming), then any remaining job params are mapped
         generically as ``params.{key}``.
         """
-        record = self._db.get(job_id)
-        if record is None:
-            raise ValueError(
-                f"Job '{job_id}' not found. Use `devrun history` to find job IDs."
+        from devrun.runner import _is_negative_index
+
+        if _is_negative_index(job_id):
+            n = -int(job_id)
+            matches: list[Any] = []
+            for rec in self._db.list_all():
+                if allowed_source_tasks is not None and rec.task_name not in allowed_source_tasks:
+                    continue
+                matches.append(rec)
+                if len(matches) >= n:
+                    break
+            if len(matches) < n:
+                detail = ""
+                if allowed_source_tasks is not None:
+                    detail = (
+                        f" matching tasks {sorted(allowed_source_tasks)}"
+                    )
+                raise ValueError(
+                    f"Cannot resolve --from-job {job_id}: only "
+                    f"{len(matches)} job(s){detail} found in history."
+                )
+            record = matches[n - 1]
+            logger.info(
+                "Resolved --from-job %s → %s (%s)",
+                job_id, record.job_id, record.task_name,
             )
+        else:
+            record = self._db.get(job_id)
+            if record is None:
+                raise ValueError(
+                    f"Job '{job_id}' not found. Use `devrun history` to find job IDs."
+                )
+
         job_params = record.params_dict
 
         # Map task-specific param names → workflow-level param names.
@@ -673,9 +712,9 @@ class WorkflowRunner:
 
         logger.info(
             "Extracted %d params from job %s (%s): %s",
-            len(dotlist), job_id, record.task_name, list(dotlist.keys()),
+            len(dotlist), record.job_id, record.task_name, list(dotlist.keys()),
         )
-        return dotlist, record.task_name
+        return dotlist, record.task_name, record.job_id
 
     def detect_stage_for_task(
         self, task_name: str, config: WorkflowConfig

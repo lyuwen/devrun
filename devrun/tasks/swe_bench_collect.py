@@ -24,6 +24,41 @@ class SWEBenchCollectTask(BaseTask):
     (SSH heredoc wrapping, Slurm sbatch scripts, etc.).
     """
 
+    @classmethod
+    def import_from_job(
+        cls, source_task: str, source_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Translate a ``swe_bench_agentic`` job's params into collect params.
+
+        Mirrors the in-stage propagation done by ``swe_bench_workflow``:
+        ``output_dir`` (auto-derived from ``logs_dir``/``run_name`` if absent)
+        and ``model_name`` is renamed to ``model_name_or_path``.
+        """
+        if source_task != "swe_bench_agentic":
+            return {}
+
+        imported: dict[str, Any] = {}
+
+        output_dir = source_params.get("output_dir")
+        if not output_dir:
+            run_name = source_params.get("run_name")
+            logs_dir = source_params.get("logs_dir", "logs")
+            if run_name:
+                output_dir = f"{logs_dir}/{run_name}"
+        if output_dir:
+            imported["output_dir"] = output_dir
+
+        for key in ("dataset", "split", "working_dir"):
+            val = source_params.get(key)
+            if val:
+                imported[key] = val
+
+        model_name = source_params.get("model_name")
+        if model_name:
+            imported["model_name_or_path"] = model_name
+
+        return imported
+
     def prepare(self, params: dict[str, Any]) -> TaskSpec:
         output_dir = params.get("output_dir")
         dataset = params.get("dataset")

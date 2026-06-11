@@ -319,6 +319,61 @@ class TestCLIRun:
             # But dry-run means no submission
             mock_runner.run.assert_called_once()
 
+    def test_run_from_job_injects_imported_params_before_cli_overrides(self):
+        """--from-job: imported params land in overrides, CLI overrides keep precedence."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            cfg = MagicMock()
+            cfg.task = "swe_bench_collect"
+            mock_runner._load_config.return_value = cfg
+            mock_runner.extract_task_params.return_value = (
+                {"output_dir": "logs/imported", "model_name_or_path": "imported-model"},
+                "swe_bench_agentic",
+                "job_abc",
+            )
+            mock_runner.run.return_value = ["job_new"]
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, [
+                "run", "swe_bench_collect",
+                "--from-job", "job_abc",
+                "params.model_name_or_path=cli-wins",
+            ])
+
+            assert result.exit_code == 0
+            mock_runner.extract_task_params.assert_called_once_with(
+                "job_abc", "swe_bench_collect"
+            )
+            # The runner.run call should have received the imported overrides
+            # before the CLI override, so CLI wins on conflicting keys.
+            call_overrides = mock_runner.run.call_args.kwargs["overrides"]
+            assert "params.output_dir=logs/imported" in call_overrides
+            assert "params.model_name_or_path=imported-model" in call_overrides
+            assert "params.model_name_or_path=cli-wins" in call_overrides
+            imp_idx = call_overrides.index("params.model_name_or_path=imported-model")
+            cli_idx = call_overrides.index("params.model_name_or_path=cli-wins")
+            assert imp_idx < cli_idx
+
+    def test_run_from_job_unsupported_source_exits_nonzero(self):
+        """When extract_task_params raises ValueError, the CLI exits 1."""
+        with patch("devrun.cli.TaskRunner") as mock_runner_class:
+            mock_runner = MagicMock()
+            cfg = MagicMock()
+            cfg.task = "swe_bench_collect"
+            mock_runner._load_config.return_value = cfg
+            mock_runner.extract_task_params.side_effect = ValueError(
+                "Task 'swe_bench_collect' does not support importing from source task 'eval'"
+            )
+            mock_runner_class.return_value = mock_runner
+
+            runner = get_cli_runner()
+            result = runner.invoke(app, [
+                "run", "swe_bench_collect", "--from-job", "job_eval",
+            ])
+            assert result.exit_code == 1
+            mock_runner.run.assert_not_called()
+
 
 class TestCLISync:
     """Tests for the 'sync' command."""
@@ -561,6 +616,7 @@ class TestWorkflowCLINewFeatures:
             mock_extract.return_value = (
                 {"params.model_name": "from-job-model"},
                 "swe_bench_agentic",
+                "job_abc123",
             )
             with patch("devrun.workflow.WorkflowRunner.detect_stage_for_task", return_value=None):
                 with patch("devrun.workflow.WorkflowRunner.run", return_value="wf_789"):
@@ -571,7 +627,9 @@ class TestWorkflowCLINewFeatures:
                     ])
                     # The flag should be parsed and extract_workflow_params called
                     assert result.exit_code in [0, 1]
-                    mock_extract.assert_called_once_with("job_abc123")
+                    mock_extract.assert_called_once()
+                    call = mock_extract.call_args
+                    assert call.args[0] == "job_abc123"
 
     def test_workflow_run_detach_flag(self, tmp_path):
         """--detach flag should call run_detached instead of run."""
@@ -807,7 +865,7 @@ stages:
         with patch("devrun.runner.find_configs", return_value=[cfg_path]):
             with patch(
                 "devrun.workflow.WorkflowRunner.extract_workflow_params",
-                return_value=({"params.model": "gpt-4"}, "swe_bench_agentic"),
+                return_value=({"params.model": "gpt-4"}, "swe_bench_agentic", "j1"),
             ):
                 with patch(
                     "devrun.workflow.WorkflowRunner.detect_stage_for_task",

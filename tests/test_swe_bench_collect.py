@@ -198,3 +198,54 @@ class TestSWEBenchCollectTask:
         spec = task.prepare(_make_params())
         assert "source_file" in spec.command
         assert "history" in spec.command
+
+    # ---- import_from_job ----------------------------------------------
+
+    def test_import_from_job_explicit_output_dir(self):
+        """When the agentic job already had output_dir, it's forwarded verbatim."""
+        imported = SWEBenchCollectTask.import_from_job(
+            "swe_bench_agentic",
+            {
+                "output_dir": "logs/run42",
+                "dataset": "/data/SWE",
+                "split": "test",
+                "model_name": "gpt-x",
+                "working_dir": "/proj",
+            },
+        )
+        assert imported == {
+            "output_dir": "logs/run42",
+            "dataset": "/data/SWE",
+            "split": "test",
+            "working_dir": "/proj",
+            "model_name_or_path": "gpt-x",
+        }
+
+    def test_import_from_job_derives_output_dir_from_run_name(self):
+        """Without output_dir, fall back to logs_dir/run_name."""
+        imported = SWEBenchCollectTask.import_from_job(
+            "swe_bench_agentic",
+            {"logs_dir": "experiments", "run_name": "alpha", "model_name": "m"},
+        )
+        assert imported["output_dir"] == "experiments/alpha"
+
+    def test_import_from_job_default_logs_dir(self):
+        """logs_dir defaults to "logs" when only run_name is given."""
+        imported = SWEBenchCollectTask.import_from_job(
+            "swe_bench_agentic", {"run_name": "beta", "model_name": "m"}
+        )
+        assert imported["output_dir"] == "logs/beta"
+
+    def test_import_from_job_skips_missing_fields(self):
+        """Falsy/missing source fields are not propagated."""
+        imported = SWEBenchCollectTask.import_from_job(
+            "swe_bench_agentic", {"model_name": "m"}
+        )
+        assert "dataset" not in imported
+        assert "working_dir" not in imported
+        assert "output_dir" not in imported  # no run_name → no output_dir
+        assert imported["model_name_or_path"] == "m"
+
+    def test_import_from_job_unsupported_source(self):
+        """Unknown source task returns an empty dict."""
+        assert SWEBenchCollectTask.import_from_job("eval", {"foo": "bar"}) == {}
