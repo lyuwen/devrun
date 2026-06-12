@@ -1,0 +1,15 @@
+[Unit]
+Description=devrun heartbeat scheduler
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{ python_path }} -m devrun.heartbeat --db {{ db_path }}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=60
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target
