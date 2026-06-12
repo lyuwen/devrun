@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import socket
 import threading
@@ -16,6 +17,11 @@ from devrun.db.jobs import JobStore
 logger = logging.getLogger(__name__)
 
 _shutdown_event = threading.Event()
+
+_PROMOTION_LEASE_SECONDS = 20
+_PROMOTION_LIMIT = 100
+
+_REQUIRED_RE = re.compile(r"^<REQUIRED(?::\s*.*?)?>$")
 
 
 def instance_id() -> str:
@@ -58,9 +64,75 @@ def _cascade_skip_failed(db: JobStore) -> None:
         logger.info("Cascade-skipped %d dependent(s): %s", len(skipped), skipped)
 
 
+def _has_required_placeholder(obj: Any) -> bool:
+    """Recursively detect a residual ``<REQUIRED:...>`` marker in a resolved config."""
+    if isinstance(obj, str):
+        return bool(_REQUIRED_RE.match(obj))
+    if isinstance(obj, dict):
+        return any(_has_required_placeholder(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return any(_has_required_placeholder(v) for v in obj)
+    return False
+
+
 def _promote_ready_queued(db: JobStore, executor_router: Any) -> None:
-    """Promote QUEUED jobs whose dependencies are satisfied. Implemented in Task 3."""
-    return None
+    """Promote QUEUED jobs whose dependencies are satisfied."""
+    if executor_router is None:
+        return
+    from omegaconf import OmegaConf
+
+    from devrun.jobref import (
+        JobRefContext,
+        clear_jobref_context,
+        install_jobref_context,
+    )
+    from devrun.registry import get_task_class
+
+    inst = instance_id()
+    for cand in db.fetch_ready_queued(limit=_PROMOTION_LIMIT):
+        if not db.claim_for_submit(
+            job_id=cand.job_id,
+            instance_id=inst,
+            lease_seconds=_PROMOTION_LEASE_SECONDS,
+        ):
+            continue
+        try:
+            cfg = OmegaConf.create(cand.params_template or "{}")
+            ctx = JobRefContext(
+                allowed_parents=db.get_parent_parameters(cand.job_id),
+                calling_job_id=cand.job_id,
+            )
+            install_jobref_context(ctx)
+            try:
+                resolved = OmegaConf.to_container(cfg, resolve=True)
+            finally:
+                clear_jobref_context()
+            if not isinstance(resolved, dict):
+                resolved = {}
+            if _has_required_placeholder(resolved):
+                db.fail_promotion(
+                    job_id=cand.job_id,
+                    skip_reason="unfilled <REQUIRED:...> placeholder",
+                )
+                continue
+            task = get_task_class(cand.task_name)()
+            spec = task.prepare(resolved)
+            executor = executor_router.get(cand.executor)
+            remote_job_id = executor.submit_with_retry(spec)
+            log_path = spec.metadata.get("log_path")
+            db.finalize_submit(
+                job_id=cand.job_id,
+                remote_job_id=remote_job_id,
+                log_path=log_path,
+                resolved_parameters=resolved,
+            )
+            logger.info(
+                "Promoted job %s -> SUBMITTED (remote=%s)",
+                cand.job_id, remote_job_id,
+            )
+        except Exception as exc:
+            logger.exception("Promotion failed for %s", cand.job_id)
+            db.fail_promotion(job_id=cand.job_id, skip_reason=str(exc))
 
 
 def _poll_active_jobs(db: JobStore, executor_router: Any) -> None:
