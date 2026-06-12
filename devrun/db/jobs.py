@@ -62,6 +62,27 @@ _JOBS_MIGRATIONS = [
     "ALTER TABLE jobs ADD COLUMN claim_expires_at TEXT",
 ]
 
+_WORKFLOW_JOBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflow_jobs (
+    workflow_id    TEXT NOT NULL,
+    stage_name     TEXT NOT NULL,
+    ordinal        INTEGER NOT NULL,
+    job_id         TEXT,
+    source_job_id  TEXT,
+    PRIMARY KEY (workflow_id, stage_name),
+    FOREIGN KEY (workflow_id)   REFERENCES workflows(workflow_id)  ON DELETE CASCADE,
+    FOREIGN KEY (job_id)        REFERENCES jobs(job_id)            ON DELETE SET NULL,
+    FOREIGN KEY (source_job_id) REFERENCES jobs(job_id)            ON DELETE SET NULL,
+    CHECK (job_id IS NOT NULL OR source_job_id IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_wfjobs_workflow ON workflow_jobs(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_wfjobs_job      ON workflow_jobs(job_id);
+"""
+
+_WORKFLOWS_MIGRATIONS = [
+    "ALTER TABLE workflows ADD COLUMN deadline_at TEXT",
+]
+
 
 class JobStore:
     """Thin wrapper around an SQLite database for job records."""
@@ -74,7 +95,14 @@ class JobStore:
         self._conn.execute(_SCHEMA)
         self._conn.execute(_WORKFLOW_SCHEMA)
         self._conn.executescript(_JOB_DEPENDENCIES_SCHEMA)
+        self._conn.executescript(_WORKFLOW_JOBS_SCHEMA)
         for migration in _JOBS_MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+        for migration in _WORKFLOWS_MIGRATIONS:
             try:
                 self._conn.execute(migration)
             except sqlite3.OperationalError as e:
