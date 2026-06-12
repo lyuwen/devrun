@@ -588,5 +588,99 @@ class JobStore:
             result[r["pid"]] = json.loads(raw) if raw else {}
         return result
 
+    # ---- workflow expiry & cancel ------------------------------------------
+
+    _TERMINAL_WORKFLOW_STATUSES = (
+        JobStatus.COMPLETED.value,
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+        JobStatus.TIMED_OUT.value,
+    )
+
+    _TERMINAL_JOB_STATUSES = frozenset(
+        {
+            JobStatus.COMPLETED.value,
+            JobStatus.FAILED.value,
+            JobStatus.CANCELLED.value,
+            JobStatus.SKIPPED.value,
+            JobStatus.TIMED_OUT.value,
+        }
+    )
+
+    def fetch_expired_workflows(self, *, now: datetime) -> list[str]:
+        """Return workflow_ids whose deadline_at is past and status is non-terminal."""
+        placeholders = ",".join("?" * len(self._TERMINAL_WORKFLOW_STATUSES))
+        sql = (
+            f"SELECT workflow_id FROM workflows "
+            f"WHERE status NOT IN ({placeholders}) "
+            f"AND deadline_at IS NOT NULL AND deadline_at < ?"
+        )
+        rows = self._conn.execute(
+            sql, (*self._TERMINAL_WORKFLOW_STATUSES, now.isoformat())
+        ).fetchall()
+        return [r["workflow_id"] for r in rows]
+
+    def expire_workflow(self, workflow_id: str) -> None:
+        """Transition a workflow's non-terminal stage jobs and mark workflow timed_out."""
+        now = datetime.now(timezone.utc).isoformat()
+        rows = self._conn.execute(
+            "SELECT job_id FROM workflow_jobs WHERE workflow_id = ? AND job_id IS NOT NULL",
+            (workflow_id,),
+        ).fetchall()
+        with self._conn:
+            for r in rows:
+                jid = r["job_id"]
+                job = self._conn.execute(
+                    "SELECT status FROM jobs WHERE job_id = ?", (jid,)
+                ).fetchone()
+                if job is None:
+                    continue
+                status = job["status"]
+                if status in self._TERMINAL_JOB_STATUSES:
+                    continue
+                if status == JobStatus.QUEUED.value:
+                    self._conn.execute(
+                        "UPDATE jobs SET status = ?, skip_reason = ?, completed_at = ? "
+                        "WHERE job_id = ?",
+                        (JobStatus.SKIPPED.value, "workflow deadline", now, jid),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE jobs SET status = ? WHERE job_id = ?",
+                        (JobStatus.CANCELING.value, jid),
+                    )
+            self._conn.execute(
+                "UPDATE workflows SET status = ?, completed_at = ? WHERE workflow_id = ?",
+                (JobStatus.TIMED_OUT.value, now, workflow_id),
+            )
+        logger.info("Expired workflow %s (jobs touched=%d)", workflow_id, len(rows))
+
+    def request_cancel(self, job_id: str) -> JobStatus:
+        """User-initiated cancel. Returns the new status; raises if already terminal."""
+        row = self._conn.execute(
+            "SELECT status FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Job {job_id} not found")
+        current = row["status"]
+        if current in self._TERMINAL_JOB_STATUSES:
+            raise ValueError(f"Job {job_id} is already {current}; cannot cancel")
+        if current == JobStatus.QUEUED.value:
+            new_status = JobStatus.CANCELLED
+            now = datetime.now(timezone.utc).isoformat()
+            self._conn.execute(
+                "UPDATE jobs SET status = ?, completed_at = ? WHERE job_id = ?",
+                (new_status.value, now, job_id),
+            )
+        else:
+            new_status = JobStatus.CANCELING
+            self._conn.execute(
+                "UPDATE jobs SET status = ? WHERE job_id = ?",
+                (new_status.value, job_id),
+            )
+        self._conn.commit()
+        logger.info("Cancel requested for job %s: %s -> %s", job_id, current, new_status.value)
+        return new_status
+
     def close(self) -> None:
         self._conn.close()

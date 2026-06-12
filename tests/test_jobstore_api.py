@@ -604,3 +604,257 @@ def test_get_parent_parameters_empty_when_no_edges():
         store = JobStore(Path(td) / "test.db")
         c = _enqueue(store)
         assert store.get_parent_parameters(c) == {}
+
+
+# ============================================================================
+# Task 11 — fetch_expired_workflows + expire_workflow + request_cancel +
+#           TIMED_OUT status (back-fill)
+# ============================================================================
+
+
+import pytest as _pytest  # alias to keep module-top imports stable
+
+
+def test_jobstatus_has_timed_out():
+    """JobStatus.TIMED_OUT back-filled from Task 1."""
+    assert JobStatus.TIMED_OUT.value == "timed_out"
+
+
+def _make_stage(**overrides):
+    """Local copy of _make_stage_row defaults for Task-11 tests."""
+    from devrun.db.jobs import WorkflowStageRow
+
+    base = dict(
+        stage_name="stage",
+        ordinal=0,
+        job_id="j-x",
+        source_job_id=None,
+        task_name="t",
+        executor="local",
+        params_template="x: 1",
+        parameters={"x": 1},
+    )
+    base.update(overrides)
+    return WorkflowStageRow(**base)
+
+
+def test_fetch_expired_workflows_returns_only_past_due():
+    """Only workflows whose deadline_at < now are returned (non-terminal status)."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        wf_past = store.enqueue_workflow(
+            workflow_name="past",
+            deadline_at=past,
+            stage_rows=[_make_stage(job_id="j-p1")],
+            edges=[],
+        )
+        wf_future = store.enqueue_workflow(
+            workflow_name="future",
+            deadline_at=future,
+            stage_rows=[_make_stage(job_id="j-f1")],
+            edges=[],
+        )
+        wf_null = store.enqueue_workflow(
+            workflow_name="null",
+            deadline_at=None,
+            stage_rows=[_make_stage(job_id="j-n1")],
+            edges=[],
+        )
+
+        expired = store.fetch_expired_workflows(now=datetime.now(timezone.utc))
+        assert wf_past in expired
+        assert wf_future not in expired
+        assert wf_null not in expired
+
+
+def test_fetch_expired_workflows_skips_terminal_workflows():
+    """A workflow already completed/failed/cancelled/timed_out is not re-expired."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        past = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        wf_id = store.enqueue_workflow(
+            workflow_name="past_completed",
+            deadline_at=past,
+            stage_rows=[_make_stage(job_id="j-tc")],
+            edges=[],
+        )
+        # Mark terminal via direct SQL
+        store._conn.execute(
+            "UPDATE workflows SET status='completed' WHERE workflow_id=?",
+            (wf_id,),
+        )
+        store._conn.commit()
+
+        expired = store.fetch_expired_workflows(now=datetime.now(timezone.utc))
+        assert wf_id not in expired
+
+
+def test_expire_workflow_transitions_stages():
+    """QUEUED jobs → SKIPPED, SUBMITTED/RUNNING → CANCELING, workflow → timed_out."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        wf_id = store.enqueue_workflow(
+            workflow_name="dline",
+            deadline_at=past,
+            stage_rows=[
+                _make_stage(stage_name="a", ordinal=0, job_id="j-a"),
+                _make_stage(stage_name="b", ordinal=1, job_id="j-b"),
+                _make_stage(stage_name="c", ordinal=2, job_id="j-c"),
+            ],
+            edges=[],
+        )
+
+        # j-a stays QUEUED, j-b becomes SUBMITTED, j-c becomes RUNNING
+        store.update_status("j-b", JobStatus.SUBMITTED)
+        store.update_status("j-c", JobStatus.RUNNING)
+
+        store.expire_workflow(wf_id)
+
+        # Verify each job's new status
+        rec_a = store.get("j-a")
+        rec_b = store.get("j-b")
+        rec_c = store.get("j-c")
+        assert rec_a is not None and JobStatus(rec_a.status) == JobStatus.SKIPPED
+        assert rec_b is not None and JobStatus(rec_b.status) == JobStatus.CANCELING
+        assert rec_c is not None and JobStatus(rec_c.status) == JobStatus.CANCELING
+
+        # skip_reason annotated on the skipped one
+        row = store._conn.execute(
+            "SELECT skip_reason FROM jobs WHERE job_id=?", ("j-a",)
+        ).fetchone()
+        assert "workflow deadline" in (row["skip_reason"] or "")
+
+        # Workflow row → timed_out
+        wf_row = store._conn.execute(
+            "SELECT status FROM workflows WHERE workflow_id=?", (wf_id,)
+        ).fetchone()
+        assert wf_row["status"] == JobStatus.TIMED_OUT.value
+
+
+def test_expire_workflow_skips_already_terminal_jobs():
+    """Jobs already in a terminal state are not transitioned by expire_workflow."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        wf_id = store.enqueue_workflow(
+            workflow_name="dline",
+            deadline_at=past,
+            stage_rows=[
+                _make_stage(stage_name="done", ordinal=0, job_id="j-d"),
+                _make_stage(stage_name="pending", ordinal=1, job_id="j-p"),
+            ],
+            edges=[],
+        )
+        store.update_status("j-d", JobStatus.COMPLETED)
+
+        store.expire_workflow(wf_id)
+
+        rec_d = store.get("j-d")
+        rec_p = store.get("j-p")
+        assert rec_d is not None and JobStatus(rec_d.status) == JobStatus.COMPLETED
+        assert rec_p is not None and JobStatus(rec_p.status) == JobStatus.SKIPPED
+
+
+def test_request_cancel_queued_to_cancelled():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        new_status = store.request_cancel(jid)
+        assert new_status == JobStatus.CANCELLED
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.CANCELLED
+
+
+def test_request_cancel_submitted_to_canceling():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        store.update_status(jid, JobStatus.SUBMITTED)
+        new_status = store.request_cancel(jid)
+        assert new_status == JobStatus.CANCELING
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.CANCELING
+
+
+def test_request_cancel_running_to_canceling():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        store.update_status(jid, JobStatus.RUNNING)
+        new_status = store.request_cancel(jid)
+        assert new_status == JobStatus.CANCELING
+
+
+def test_request_cancel_terminal_raises():
+    """Terminal statuses cannot be cancelled."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        store.update_status(jid, JobStatus.COMPLETED)
+        with _pytest.raises(ValueError):
+            store.request_cancel(jid)
+
+
+def test_expire_workflow_ignores_skipped_source_only_stages():
+    """A stage with job_id=None, source_job_id set is not touched by expire."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        # The source job is COMPLETED upstream (from a previous run) — its
+        # status must NOT be mutated when the workflow expires.
+        src = store.insert("inference", "slurm")
+        store.update_status(src, JobStatus.COMPLETED)
+
+        wf_id = store.enqueue_workflow(
+            workflow_name="resume_dline",
+            deadline_at=past,
+            stage_rows=[
+                _make_stage(
+                    stage_name="inference",
+                    ordinal=0,
+                    job_id=None,
+                    source_job_id=src,
+                    task_name=None,
+                    executor=None,
+                    params_template=None,
+                    parameters=None,
+                ),
+                _make_stage(stage_name="collect", ordinal=1, job_id="j-c"),
+            ],
+            edges=[],
+        )
+
+        store.expire_workflow(wf_id)
+
+        # Source job (referenced via source_job_id only) untouched
+        rec_src = store.get(src)
+        assert rec_src is not None
+        assert JobStatus(rec_src.status) == JobStatus.COMPLETED
+
+        # The real stage with job_id is transitioned
+        rec_c = store.get("j-c")
+        assert rec_c is not None
+        assert JobStatus(rec_c.status) == JobStatus.SKIPPED
+
+        wf_row = store._conn.execute(
+            "SELECT status FROM workflows WHERE workflow_id=?", (wf_id,)
+        ).fetchone()
+        assert wf_row["status"] == JobStatus.TIMED_OUT.value

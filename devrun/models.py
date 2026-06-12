@@ -28,6 +28,7 @@ class JobStatus(str, Enum):
     CANCELING = "canceling"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+    TIMED_OUT = "timed_out"
     UNKNOWN = "unknown"
 
 
