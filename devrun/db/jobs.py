@@ -17,6 +17,11 @@ logger = logging.getLogger("devrun.db.jobs")
 
 _DEFAULT_DB_PATH = Path.home() / ".devrun" / "jobs.db"
 
+
+def default_db_path() -> Path:
+    """Return the default SQLite path used by ``JobStore`` when none is supplied."""
+    return _DEFAULT_DB_PATH
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     job_id        TEXT PRIMARY KEY,
@@ -690,3 +695,10 @@ class JobStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def status_counts(self) -> dict[str, int]:
+        """Return ``{status: count}`` across all jobs (heartbeat status view)."""
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
+        ).fetchall()
+        return {r["status"]: r["n"] for r in rows}

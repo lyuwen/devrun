@@ -242,3 +242,24 @@ def run_loop(
             tick_file.write_text(_now().isoformat())
         _shutdown_event.wait(interval)
     logger.info("Heartbeat shut down cleanly")
+
+
+def main() -> None:
+    """``python -m devrun.heartbeat`` entry point (used by the systemd/launchd units)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="devrun heartbeat scheduler")
+    parser.add_argument("--db", type=Path, required=True, help="Path to the jobs SQLite DB")
+    parser.add_argument("--interval", type=float, default=10.0, help="Tick interval in seconds")
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    tick_file = Path.home() / ".devrun" / "heartbeat.tick"
+    tick_file.parent.mkdir(parents=True, exist_ok=True)
+    run_loop(args.db, interval=args.interval, tick_file=tick_file)
+
+
+if __name__ == "__main__":
+    main()

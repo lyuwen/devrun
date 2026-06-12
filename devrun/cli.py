@@ -474,6 +474,10 @@ def fetch(
 workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows.", no_args_is_help=True)
 app.add_typer(workflow_app, name="workflow")
 
+from devrun.cli_heartbeat import heartbeat_app  # noqa: E402
+
+app.add_typer(heartbeat_app, name="heartbeat")
+
 
 def _show_workflow_help(target: str) -> None:
     """Show help for a specific workflow based on its configuration."""
