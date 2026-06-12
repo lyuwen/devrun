@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from devrun.db.jobs import JobStore
+from devrun.models import JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,35 @@ _PROMOTION_LEASE_SECONDS = 20
 _PROMOTION_LIMIT = 100
 
 _REQUIRED_RE = re.compile(r"^<REQUIRED(?::\s*.*?)?>$")
+
+_EXECUTOR_STATUS_MAP: dict[str, JobStatus] = {
+    "running": JobStatus.RUNNING,
+    "pending": JobStatus.PENDING,
+    "completed": JobStatus.COMPLETED,
+    "done": JobStatus.COMPLETED,
+    "failed": JobStatus.FAILED,
+    "cancelled": JobStatus.CANCELLED,
+    "timeout": JobStatus.FAILED,
+    "completing": JobStatus.RUNNING,
+    "node_fail": JobStatus.FAILED,
+    "out_of_memory": JobStatus.FAILED,
+    "preempted": JobStatus.FAILED,
+    "boot_fail": JobStatus.FAILED,
+    "deadline": JobStatus.FAILED,
+    "stopped": JobStatus.FAILED,
+    "suspended": JobStatus.RUNNING,
+    "requeued": JobStatus.PENDING,
+    "resizing": JobStatus.RUNNING,
+}
+
+_TERMINAL_POLL_STATUSES = frozenset(
+    {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+)
+
+
+def map_status(raw: str) -> JobStatus:
+    """Map an executor-reported status string to a :class:`JobStatus`."""
+    return _EXECUTOR_STATUS_MAP.get(raw.lower(), JobStatus.UNKNOWN)
 
 
 def instance_id() -> str:
@@ -136,8 +166,39 @@ def _promote_ready_queued(db: JobStore, executor_router: Any) -> None:
 
 
 def _poll_active_jobs(db: JobStore, executor_router: Any) -> None:
-    """Poll SUBMITTED/RUNNING/CANCELING jobs. Implemented in Task 5."""
-    return None
+    """Poll SUBMITTED/RUNNING/CANCELING jobs and write back any status change."""
+    if executor_router is None:
+        return
+    for rec in db.fetch_active_jobs():
+        remote_id = rec.remote_job_id
+        if not remote_id:
+            continue
+        try:
+            executor = executor_router.get(rec.executor)
+            raw_status = executor.status(remote_id)
+        except Exception:
+            logger.exception(
+                "Poll failed for job %s (remote=%s); will retry next tick",
+                rec.job_id, remote_id,
+            )
+            continue
+        mapped = map_status(raw_status)
+        if mapped == JobStatus.UNKNOWN:
+            logger.warning(
+                "Job %s: unknown executor status %r; leaving row untouched",
+                rec.job_id, raw_status,
+            )
+            continue
+        current = JobStatus(rec.status) if isinstance(rec.status, str) else rec.status
+        if mapped == current:
+            continue
+        completed_at = _now() if mapped in _TERMINAL_POLL_STATUSES else None
+        db.update_status(rec.job_id, mapped, completed_at=completed_at)
+        logger.info(
+            "Job %s: %s -> %s (remote=%s)",
+            rec.job_id, current.value if isinstance(current, JobStatus) else current,
+            mapped.value, remote_id,
+        )
 
 
 def run_loop(

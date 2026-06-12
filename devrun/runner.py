@@ -397,23 +397,6 @@ class TaskRunner:
     @staticmethod
     def _map_status(raw: str) -> JobStatus:
         """Map executor-reported status strings to :class:`JobStatus`."""
-        mapping = {
-            "running": JobStatus.RUNNING,
-            "pending": JobStatus.PENDING,
-            "completed": JobStatus.COMPLETED,
-            "done": JobStatus.COMPLETED,
-            "failed": JobStatus.FAILED,
-            "cancelled": JobStatus.CANCELLED,
-            "timeout": JobStatus.FAILED,
-            "completing": JobStatus.RUNNING,
-            "node_fail": JobStatus.FAILED,
-            "out_of_memory": JobStatus.FAILED,
-            "preempted": JobStatus.FAILED,
-            "boot_fail": JobStatus.FAILED,
-            "deadline": JobStatus.FAILED,
-            "stopped": JobStatus.FAILED,
-            "suspended": JobStatus.RUNNING,
-            "requeued": JobStatus.PENDING,
-            "resizing": JobStatus.RUNNING,
-        }
-        return mapping.get(raw.lower(), JobStatus.UNKNOWN)
+        from devrun.heartbeat import map_status
+
+        return map_status(raw)
