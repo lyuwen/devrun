@@ -60,10 +60,16 @@ Registered types: `eval`, `inference`, `deploy_ray`, `swe_bench_eval`, `swe_benc
 ## Database Schema (`devrun/db/jobs.py`)
 
 Table: `jobs`
-Columns: `job_id`, `task_name`, `executor`, `parameters`, `remote_job_id`, `status`, `created_at`, `completed_at`, `log_path`
+Columns: `job_id`, `task_name`, `executor`, `parameters`, `params_template`, `remote_job_id`, `status`, `created_at`, `completed_at`, `log_path`, `skip_reason`, `claimed_by`, `claimed_at`, `claim_expires_at`
 
 Table: `workflows`
-Columns: `workflow_id`, `workflow_name`, `stages_state` (JSON), `status`, `created_at`, `completed_at`
+Columns: `workflow_id`, `workflow_name`, `stages_state` (JSON), `status`, `created_at`, `completed_at`, `deadline_at`
+
+Table: `job_dependencies`
+Columns: `child_job_id`, `parent_job_id`, `allow_failure`
+
+Table: `workflow_jobs`
+Columns: `workflow_id`, `stage_name`, `ordinal`, `job_id`, `source_job_id`
 
 ## Development Specifics
 
@@ -71,6 +77,7 @@ Columns: `workflow_id`, `workflow_name`, `stages_state` (JSON), `status`, `creat
 * **Environment:** Installed globally in local `.venv`.
 * **Formatting/Linting:** Not explicitly enforced, but code follows typing-heavy, strict schema practices. Supports Python 3.10+.
 * **Issue to note:** Handled a regression related to Pydantic v2 incompatibilities in `models.py` (migrated away from `__root__` logic and inner `class Config` usage to `model_config = {}` dictionary and `.model_dump(mode="json")` for parsing `run_history` datetimes).
+* **JobStore typed API surface (PR1):** The `JobStore` exposes a typed API surface (`enqueue`, `enqueue_workflow`, `claim_for_submit`, `finalize_submit`, `fail_promotion`, `reclaim_expired_leases`, `cascade_skip_dependents`, `fetch_ready_queued`, `fetch_active_jobs`, `fetch_expired_workflows`, `expire_workflow`, `request_cancel`, `list_dependencies`, `get_parent_parameters`, `get_workflow_stages`). PR1 lands the schema and APIs only; no producer/consumer code uses them yet.
 * **Shell safety:** All executor plugins use `shlex.quote()` when interpolating user-supplied values (env vars, paths, command args) into shell strings. SSH commands use heredocs rather than `bash -c '...'` wrapping to handle single quotes in commands. Jinja2 templates use the `shell_quote` filter for shell contexts and `json.dumps()` for jq expression values.
 * **Datetime:** All timestamps use `datetime.now(timezone.utc)` (timezone-aware). `datetime.utcnow()` is deprecated in Python 3.12+ and must not be re-introduced.
 * **Log path propagation pattern:** When an executor knows the log path at submit time, it writes it to `task_spec.metadata["log_path"]`. The runner reads this after `submit_with_retry()` and passes it to `db.update_status(..., log_path=...)`. The runner then retrieves `record.log_path` and passes it as `executor.logs(remote_id, log_path=record.log_path)`. All `logs()` implementations accept the optional `log_path` kwarg.
