@@ -1,6 +1,7 @@
 """Tests for JobStore typed API surface (PR1 Tasks 7+)."""
 
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from devrun.db.jobs import JobStore
@@ -112,3 +113,494 @@ def test_insert_dependency_allow_failure_true():
         ).fetchone()
         assert row is not None
         assert row[0] == 1
+
+
+# ============================================================================
+# Task 8 — enqueue_workflow (atomic) + WorkflowStageRow
+# ============================================================================
+
+
+def _make_stage_row(**overrides):
+    """Build a WorkflowStageRow with sensible defaults; overrides win."""
+    from devrun.db.jobs import WorkflowStageRow
+
+    base = dict(
+        stage_name="stage",
+        ordinal=0,
+        job_id="j-x",
+        source_job_id=None,
+        task_name="t",
+        executor="local",
+        params_template="x: 1",
+        parameters={"x": 1},
+    )
+    base.update(overrides)
+    return WorkflowStageRow(**base)
+
+
+def test_enqueue_workflow_atomic():
+    """Single-transaction insert: workflow row + jobs + workflow_jobs + edges."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+
+        rows = [
+            _make_stage_row(
+                stage_name="inference",
+                ordinal=0,
+                job_id="j-inf",
+                task_name="inference",
+                executor="slurm",
+                parameters={"model": "x"},
+            ),
+            _make_stage_row(
+                stage_name="collect",
+                ordinal=1,
+                job_id="j-col",
+                task_name="swe_bench_collect",
+                executor="ssh",
+                parameters={},
+            ),
+        ]
+        edges = [("j-col", "j-inf", False)]
+        wf_id = store.enqueue_workflow(
+            workflow_name="swe_full",
+            deadline_at=None,
+            stage_rows=rows,
+            edges=edges,
+        )
+
+        assert isinstance(wf_id, str) and len(wf_id) > 0
+
+        stages = store.get_workflow_stages(wf_id)
+        assert [s.stage_name for s in stages] == ["inference", "collect"]
+        assert [s.ordinal for s in stages] == [0, 1]
+        assert [s.job_id for s in stages] == ["j-inf", "j-col"]
+
+        # Both jobs were inserted into jobs
+        for jid in ("j-inf", "j-col"):
+            rec = store.get(jid)
+            assert rec is not None
+            assert JobStatus(rec.status) == JobStatus.QUEUED
+
+        # Edge persisted
+        deps = store.list_dependencies("j-col")
+        assert len(deps) == 1
+        assert deps[0].parent_job_id == "j-inf"
+        assert bool(deps[0].allow_failure) is False
+
+
+def test_enqueue_workflow_source_only_stage_skipped():
+    """A stage with source_job_id only (no new job) still gets a workflow_jobs row."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+
+        # Pre-existing source job (from --from-job pattern)
+        src = store.insert("inference", "slurm")
+
+        rows = [
+            _make_stage_row(
+                stage_name="inference",
+                ordinal=0,
+                job_id=None,
+                source_job_id=src,
+                task_name=None,
+                executor=None,
+                params_template=None,
+                parameters=None,
+            ),
+            _make_stage_row(
+                stage_name="collect",
+                ordinal=1,
+                job_id="j-col",
+                task_name="swe_bench_collect",
+                executor="ssh",
+                parameters={},
+            ),
+        ]
+        wf_id = store.enqueue_workflow(
+            workflow_name="swe_resume",
+            deadline_at=None,
+            stage_rows=rows,
+            edges=[("j-col", src, False)],
+        )
+
+        stages = store.get_workflow_stages(wf_id)
+        names = {s.stage_name for s in stages}
+        assert names == {"inference", "collect"}
+        skipped = [s for s in stages if s.stage_name == "inference"][0]
+        assert skipped.source_job_id == src
+        assert skipped.job_id is None
+
+
+def test_enqueue_workflow_writes_deadline():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+
+        deadline = datetime(2099, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        rows = [_make_stage_row()]
+        wf_id = store.enqueue_workflow(
+            workflow_name="dline",
+            deadline_at=deadline,
+            stage_rows=rows,
+            edges=[],
+        )
+
+        row = store._conn.execute(
+            "SELECT deadline_at FROM workflows WHERE workflow_id = ?",
+            (wf_id,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] is not None
+        # Round-trips as ISO 8601
+        assert "2099" in row[0]
+
+
+# ============================================================================
+# Task 9 — claim_for_submit (CAS) + finalize_submit + fail_promotion + reclaim
+# ============================================================================
+
+
+def test_claim_for_submit_cas():
+    """Two back-to-back claims on the same QUEUED job — exactly one wins."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t",
+            executor="e",
+            params_template="x: 1",
+            parameters={"x": 1},
+        )
+
+        won_a = store.claim_for_submit(job_id=jid, instance_id="A", lease_seconds=20)
+        won_b = store.claim_for_submit(job_id=jid, instance_id="B", lease_seconds=20)
+        assert won_a is True
+        assert won_b is False
+
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SUBMITTING
+
+        row = store._conn.execute(
+            "SELECT claimed_by, claimed_at, claim_expires_at FROM jobs WHERE job_id = ?",
+            (jid,),
+        ).fetchone()
+        assert row["claimed_by"] == "A"
+        assert row["claimed_at"] is not None
+        assert row["claim_expires_at"] is not None
+
+
+def test_claim_for_submit_refuses_non_queued():
+    """A job already submitting/submitted cannot be claimed."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        assert store.claim_for_submit(job_id=jid, instance_id="A", lease_seconds=10) is True
+        # Already SUBMITTING
+        assert store.claim_for_submit(job_id=jid, instance_id="B", lease_seconds=10) is False
+
+
+def test_finalize_submit_transitions_and_clears_claim():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="x: 1", parameters={}
+        )
+        store.claim_for_submit(job_id=jid, instance_id="A", lease_seconds=20)
+
+        store.finalize_submit(
+            job_id=jid,
+            remote_job_id="remote-42",
+            log_path="/tmp/x.log",
+            resolved_parameters={"x": 1, "model": "gpt"},
+        )
+
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SUBMITTED
+        assert rec.remote_job_id == "remote-42"
+        assert rec.log_path == "/tmp/x.log"
+        assert rec.params_dict.get("model") == "gpt"
+
+        row = store._conn.execute(
+            "SELECT claimed_by, claimed_at, claim_expires_at FROM jobs WHERE job_id = ?",
+            (jid,),
+        ).fetchone()
+        assert row["claimed_by"] is None
+        assert row["claimed_at"] is None
+        assert row["claim_expires_at"] is None
+
+
+def test_fail_promotion_sets_failed_and_skip_reason():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        store.claim_for_submit(job_id=jid, instance_id="A", lease_seconds=20)
+
+        store.fail_promotion(job_id=jid, skip_reason="missing template var X")
+
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.FAILED
+
+        row = store._conn.execute(
+            "SELECT skip_reason, claimed_by, claim_expires_at FROM jobs WHERE job_id = ?",
+            (jid,),
+        ).fetchone()
+        assert "missing template var X" in row["skip_reason"]
+        assert row["claimed_by"] is None
+        assert row["claim_expires_at"] is None
+
+
+def test_reclaim_expired_leases_returns_to_queued():
+    """SUBMITTING with expired lease + NULL remote_job_id → QUEUED with annotation."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+
+        # Manually force a SUBMITTING row with claim_expires_at in the past.
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        store._conn.execute(
+            "UPDATE jobs SET status='submitting', claimed_by='oldhost:1', "
+            "claimed_at=?, claim_expires_at=?, remote_job_id=NULL WHERE job_id=?",
+            (past, past, jid),
+        )
+        store._conn.commit()
+
+        reclaimed = store.reclaim_expired_leases(now=datetime.now(timezone.utc))
+        assert jid in reclaimed
+
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.QUEUED
+
+        row = store._conn.execute(
+            "SELECT skip_reason, claimed_by, claim_expires_at FROM jobs WHERE job_id = ?",
+            (jid,),
+        ).fetchone()
+        assert "reclaimed" in (row["skip_reason"] or "").lower()
+        assert row["claimed_by"] is None
+        assert row["claim_expires_at"] is None
+
+
+def test_reclaim_expired_leases_skips_rows_with_remote_job_id():
+    """A SUBMITTING row that already has a remote_job_id is NOT reclaimed."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        store._conn.execute(
+            "UPDATE jobs SET status='submitting', claimed_by='oldhost:1', "
+            "claimed_at=?, claim_expires_at=?, remote_job_id='remote-9' WHERE job_id=?",
+            (past, past, jid),
+        )
+        store._conn.commit()
+
+        reclaimed = store.reclaim_expired_leases(now=datetime.now(timezone.utc))
+        assert jid not in reclaimed
+
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SUBMITTING
+
+
+def test_reclaim_expired_leases_skips_unexpired():
+    """A live lease (claim_expires_at > now) is not reclaimed."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+        store.claim_for_submit(job_id=jid, instance_id="A", lease_seconds=600)
+
+        reclaimed = store.reclaim_expired_leases(now=datetime.now(timezone.utc))
+        assert jid not in reclaimed
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SUBMITTING
+
+
+# ============================================================================
+# Task 10 — cascade_skip_dependents + fetch_ready_queued + fetch_active_jobs
+#           + get_parent_parameters
+# ============================================================================
+
+
+def _enqueue(store, **overrides):
+    kwargs = dict(task_name="t", executor="e", params_template="", parameters={})
+    kwargs.update(overrides)
+    return store.enqueue(**kwargs)
+
+
+def test_cascade_skip_blocking_failure():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p, allow_failure=False)
+        store.update_status(p, JobStatus.FAILED)
+
+        skipped = store.cascade_skip_dependents()
+        assert c in skipped
+
+        rec = store.get(c)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SKIPPED
+
+        row = store._conn.execute(
+            "SELECT skip_reason FROM jobs WHERE job_id = ?", (c,)
+        ).fetchone()
+        assert p in (row["skip_reason"] or "")
+
+
+def test_cascade_skip_respects_allow_failure():
+    """When allow_failure=1, parent FAILED does NOT cascade-skip the child."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p, allow_failure=True)
+        store.update_status(p, JobStatus.FAILED)
+
+        skipped = store.cascade_skip_dependents()
+        assert c not in skipped
+        rec = store.get(c)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.QUEUED
+
+
+def test_cascade_skip_on_skipped_parent():
+    """A skipped parent also cascades to its blocking dependents."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p, allow_failure=False)
+        store.update_status(p, JobStatus.SKIPPED)
+
+        skipped = store.cascade_skip_dependents()
+        assert c in skipped
+        rec = store.get(c)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SKIPPED
+
+
+def test_cascade_skip_idempotent_does_not_re_skip():
+    """Running cascade twice produces an empty second result."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p, allow_failure=False)
+        store.update_status(p, JobStatus.FAILED)
+
+        first = store.cascade_skip_dependents()
+        second = store.cascade_skip_dependents()
+        assert c in first
+        assert c not in second
+
+
+def test_fetch_ready_queued_two_parents_completed():
+    """A queued job with all parents COMPLETED is ready."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p1 = _enqueue(store)
+        p2 = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p1, allow_failure=False)
+        store.insert_dependency(child_job_id=c, parent_job_id=p2, allow_failure=False)
+        store.update_status(p1, JobStatus.COMPLETED)
+        store.update_status(p2, JobStatus.COMPLETED)
+
+        ready = store.fetch_ready_queued()
+        ready_ids = {r.job_id for r in ready}
+        assert c in ready_ids
+
+
+def test_fetch_ready_queued_one_parent_running():
+    """If any parent is still running, child is not ready."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p1 = _enqueue(store)
+        p2 = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p1, allow_failure=False)
+        store.insert_dependency(child_job_id=c, parent_job_id=p2, allow_failure=False)
+        store.update_status(p1, JobStatus.COMPLETED)
+        store.update_status(p2, JobStatus.RUNNING)
+
+        ready = store.fetch_ready_queued()
+        assert c not in {r.job_id for r in ready}
+
+
+def test_fetch_ready_queued_includes_jobs_without_parents():
+    """A queued job with no parent edges is immediately ready."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        a = _enqueue(store)
+        ready = store.fetch_ready_queued()
+        assert a in {r.job_id for r in ready}
+
+
+def test_fetch_ready_queued_allow_failure_parent_failed():
+    """allow_failure=1 parent that FAILED still counts as satisfied."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p = _enqueue(store)
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p, allow_failure=True)
+        store.update_status(p, JobStatus.FAILED)
+
+        ready = store.fetch_ready_queued()
+        assert c in {r.job_id for r in ready}
+
+
+def test_fetch_active_jobs_returns_submitted_running_canceling():
+    """fetch_active_jobs returns rows whose status is in {submitted, running, canceling}."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        a = _enqueue(store)  # queued
+        b = _enqueue(store)
+        c = _enqueue(store)
+        d = _enqueue(store)
+        e = _enqueue(store)
+        store.update_status(b, JobStatus.SUBMITTED)
+        store.update_status(c, JobStatus.RUNNING)
+        store.update_status(d, JobStatus.CANCELING)
+        store.update_status(e, JobStatus.COMPLETED)
+
+        active_ids = {r.job_id for r in store.fetch_active_jobs()}
+        assert a not in active_ids
+        assert e not in active_ids
+        assert {b, c, d} <= active_ids
+
+
+def test_get_parent_parameters_returns_parsed_dicts():
+    """Returns {parent_id: parsed_parameters_dict} for every dep edge."""
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        p1 = _enqueue(store, parameters={"out": "/data/p1"})
+        p2 = _enqueue(store, parameters={"out": "/data/p2", "model": "gpt"})
+        c = _enqueue(store)
+        store.insert_dependency(child_job_id=c, parent_job_id=p1, allow_failure=False)
+        store.insert_dependency(child_job_id=c, parent_job_id=p2, allow_failure=False)
+
+        result = store.get_parent_parameters(c)
+        assert set(result.keys()) == {p1, p2}
+        assert result[p1] == {"out": "/data/p1"}
+        assert result[p2] == {"out": "/data/p2", "model": "gpt"}
+
+
+def test_get_parent_parameters_empty_when_no_edges():
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        c = _enqueue(store)
+        assert store.get_parent_parameters(c) == {}

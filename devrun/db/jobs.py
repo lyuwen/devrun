@@ -6,7 +6,8 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,29 @@ CREATE INDEX IF NOT EXISTS idx_wfjobs_job      ON workflow_jobs(job_id);
 _WORKFLOWS_MIGRATIONS = [
     "ALTER TABLE workflows ADD COLUMN deadline_at TEXT",
 ]
+
+
+@dataclass
+class WorkflowStageRow:
+    """One row of a workflow plan handed to ``JobStore.enqueue_workflow``."""
+
+    stage_name: str
+    ordinal: int
+    job_id: str | None
+    source_job_id: str | None
+    task_name: str | None
+    executor: str | None
+    params_template: str | None
+    parameters: dict[str, Any] | None
+
+
+@dataclass
+class Dependency:
+    """A persisted parent edge for a child job."""
+
+    child_job_id: str
+    parent_job_id: str
+    allow_failure: int
 
 
 class JobStore:
@@ -295,6 +319,107 @@ class JobStore:
         """Return recent workflows ordered by creation time."""
         rows = self._conn.execute("SELECT * FROM workflows ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- workflow enqueue (atomic) -----------------------------------------
+
+    def enqueue_workflow(
+        self,
+        *,
+        workflow_name: str,
+        deadline_at: datetime | None,
+        stage_rows: list[WorkflowStageRow],
+        edges: list[tuple[str, str, bool]],
+    ) -> str:
+        """Atomically insert a workflow plan: workflow row + per-stage rows + edges."""
+        workflow_id = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO workflows (workflow_id, workflow_name, stages_state, status, "
+                "created_at, deadline_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    workflow_id,
+                    workflow_name,
+                    "{}",
+                    JobStatus.QUEUED.value,
+                    now,
+                    deadline_at.isoformat() if deadline_at else None,
+                ),
+            )
+            for r in stage_rows:
+                if r.job_id is not None:
+                    self._conn.execute(
+                        "INSERT INTO jobs (job_id, task_name, executor, params_template, "
+                        "parameters, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            r.job_id,
+                            r.task_name,
+                            r.executor,
+                            r.params_template,
+                            json.dumps(r.parameters or {}),
+                            JobStatus.QUEUED.value,
+                            now,
+                        ),
+                    )
+                self._conn.execute(
+                    "INSERT INTO workflow_jobs (workflow_id, stage_name, ordinal, "
+                    "job_id, source_job_id) VALUES (?, ?, ?, ?, ?)",
+                    (workflow_id, r.stage_name, r.ordinal, r.job_id, r.source_job_id),
+                )
+            for child, parent, allow_fail in edges:
+                self._conn.execute(
+                    "INSERT INTO job_dependencies (child_job_id, parent_job_id, allow_failure) "
+                    "VALUES (?, ?, ?)",
+                    (child, parent, 1 if allow_fail else 0),
+                )
+        logger.info(
+            "Enqueued workflow %s (name=%s, stages=%d, edges=%d)",
+            workflow_id, workflow_name, len(stage_rows), len(edges),
+        )
+        return workflow_id
+
+    def get_workflow_stages(self, workflow_id: str) -> list[WorkflowStageRow]:
+        """Return stage rows for *workflow_id* ordered by ordinal."""
+        rows = self._conn.execute(
+            "SELECT wj.stage_name, wj.ordinal, wj.job_id, wj.source_job_id, "
+            "       j.task_name, j.executor, j.params_template, j.parameters "
+            "FROM workflow_jobs wj "
+            "LEFT JOIN jobs j ON j.job_id = wj.job_id "
+            "WHERE wj.workflow_id = ? ORDER BY wj.ordinal",
+            (workflow_id,),
+        ).fetchall()
+        result: list[WorkflowStageRow] = []
+        for r in rows:
+            params = json.loads(r["parameters"]) if r["parameters"] else None
+            result.append(
+                WorkflowStageRow(
+                    stage_name=r["stage_name"],
+                    ordinal=r["ordinal"],
+                    job_id=r["job_id"],
+                    source_job_id=r["source_job_id"],
+                    task_name=r["task_name"],
+                    executor=r["executor"],
+                    params_template=r["params_template"],
+                    parameters=params,
+                )
+            )
+        return result
+
+    def list_dependencies(self, child_job_id: str) -> list[Dependency]:
+        """Return all parent edges for *child_job_id*."""
+        rows = self._conn.execute(
+            "SELECT child_job_id, parent_job_id, allow_failure FROM job_dependencies "
+            "WHERE child_job_id = ?",
+            (child_job_id,),
+        ).fetchall()
+        return [
+            Dependency(
+                child_job_id=r["child_job_id"],
+                parent_job_id=r["parent_job_id"],
+                allow_failure=r["allow_failure"],
+            )
+            for r in rows
+        ]
 
     def close(self) -> None:
         self._conn.close()
