@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS workflows (
 );
 """
 
+_JOB_DEPENDENCIES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_dependencies (
+    child_job_id  TEXT NOT NULL,
+    parent_job_id TEXT NOT NULL,
+    allow_failure INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (child_job_id, parent_job_id),
+    FOREIGN KEY (child_job_id)  REFERENCES jobs(job_id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_jobdeps_child  ON job_dependencies(child_job_id);
+CREATE INDEX IF NOT EXISTS idx_jobdeps_parent ON job_dependencies(parent_job_id);
+"""
+
 
 class JobStore:
     """Thin wrapper around an SQLite database for job records."""
@@ -52,6 +65,7 @@ class JobStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_SCHEMA)
         self._conn.execute(_WORKFLOW_SCHEMA)
+        self._conn.executescript(_JOB_DEPENDENCIES_SCHEMA)
         self._conn.commit()
         logger.debug("Job store initialised at %s", self._db_path)
 
