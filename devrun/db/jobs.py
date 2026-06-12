@@ -54,6 +54,14 @@ CREATE INDEX IF NOT EXISTS idx_jobdeps_child  ON job_dependencies(child_job_id);
 CREATE INDEX IF NOT EXISTS idx_jobdeps_parent ON job_dependencies(parent_job_id);
 """
 
+_JOBS_MIGRATIONS = [
+    "ALTER TABLE jobs ADD COLUMN params_template TEXT",
+    "ALTER TABLE jobs ADD COLUMN skip_reason TEXT",
+    "ALTER TABLE jobs ADD COLUMN claimed_by TEXT",
+    "ALTER TABLE jobs ADD COLUMN claimed_at TEXT",
+    "ALTER TABLE jobs ADD COLUMN claim_expires_at TEXT",
+]
+
 
 class JobStore:
     """Thin wrapper around an SQLite database for job records."""
@@ -66,6 +74,12 @@ class JobStore:
         self._conn.execute(_SCHEMA)
         self._conn.execute(_WORKFLOW_SCHEMA)
         self._conn.executescript(_JOB_DEPENDENCIES_SCHEMA)
+        for migration in _JOBS_MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         self._conn.commit()
         logger.debug("Job store initialised at %s", self._db_path)
 
