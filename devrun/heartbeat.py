@@ -175,6 +175,24 @@ def _poll_active_jobs(db: JobStore, executor_router: Any) -> None:
             continue
         try:
             executor = executor_router.get(rec.executor)
+        except Exception:
+            logger.exception(
+                "Router lookup failed for job %s; will retry next tick", rec.job_id
+            )
+            continue
+        current = JobStatus(rec.status) if isinstance(rec.status, str) else rec.status
+        if current == JobStatus.CANCELING:
+            try:
+                executor.cancel(remote_id)
+            except Exception:
+                logger.exception(
+                    "executor.cancel(%s) failed for job %s; finalizing CANCELLED anyway",
+                    remote_id, rec.job_id,
+                )
+            db.update_status(rec.job_id, JobStatus.CANCELLED, completed_at=_now())
+            logger.info("Job %s: canceling -> cancelled (remote=%s)", rec.job_id, remote_id)
+            continue
+        try:
             raw_status = executor.status(remote_id)
         except Exception:
             logger.exception(
@@ -189,7 +207,6 @@ def _poll_active_jobs(db: JobStore, executor_router: Any) -> None:
                 rec.job_id, raw_status,
             )
             continue
-        current = JobStatus(rec.status) if isinstance(rec.status, str) else rec.status
         if mapped == current:
             continue
         completed_at = _now() if mapped in _TERMINAL_POLL_STATUSES else None
