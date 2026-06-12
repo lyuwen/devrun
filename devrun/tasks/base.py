@@ -24,5 +24,18 @@ class BaseTask(ABC):
         """
         return [self.prepare(params)]
 
+    @classmethod
+    def import_from_job(
+        cls, source_task: str, source_params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Translate params from a previous job into this task's param schema.
+
+        Subclasses override this to enable ``devrun run <task> --from-job <id>``.
+        The returned dict is shallow-merged into the YAML defaults before CLI
+        overrides are applied.  Return an empty dict if *source_task* is not
+        recognised; raise :class:`ValueError` to signal an explicit mismatch.
+        """
+        return {}
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}>"

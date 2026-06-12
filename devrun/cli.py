@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -137,16 +136,20 @@ def _show_task_help(target: str, ctx: typer.Context) -> None:
 def run(
     ctx: typer.Context,
     target: Optional[str] = typer.Argument(
-        None, 
+        None,
         help="Config path, task, or task/variation",
         autocompletion=complete_target
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Prepare job without actually executing it"),
+    from_job: Optional[str] = typer.Option(
+        None, "--from-job",
+        help="Import params from an existing job (e.g. swe_bench_collect --from-job <agentic_job_id>)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
     """Submit a task using a config file or variation. Trailing arguments are passed as OmegaConf overrides."""
-    
+
     # Handle help manually so we can show task-specific help
     if help:
         if not target:
@@ -157,20 +160,46 @@ def run(
             # Show task-specific help using its configuration template
             _show_task_help(target, ctx)
             raise typer.Exit()
-            
+
     if not target:
         console.print("[red]Missing argument 'TARGET'.[/red]\n")
         console.print(ctx.get_help())
         raise typer.Exit(code=2)
-        
+
     _setup_logging(verbose)
     runner = _runner()
-    
-    # Any trailing arguments will be passed as overrides
-    overrides = ctx.args
-    if overrides:
-        console.print(f"[dim]Using overrides: {overrides}[/dim]")
-        
+
+    # Merge order: YAML base → from-job imported params → CLI trailing overrides.
+    # Imported params are converted to dotlist entries and prepended so that
+    # any matching CLI override wins.
+    overrides: list[str] = []
+
+    if from_job:
+        # Resolve target → task name to drive the import hook.
+        try:
+            task_name = runner._load_config(target).task
+        except FileNotFoundError:
+            console.print(f"[red]Error:[/red] No config found for target '{target}'.")
+            raise typer.Exit(code=1)
+        except Exception as exc:
+            console.print(f"[red]Failed to load configuration for '{target}':[/red] {exc}")
+            raise typer.Exit(code=1)
+        try:
+            imported, source_task, resolved_job_id = runner.extract_task_params(
+                from_job, task_name
+            )
+        except ValueError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[dim]From job {resolved_job_id} ({source_task}): {list(imported.keys())}[/dim]"
+        )
+        overrides.extend(f"params.{k}={v}" for k, v in imported.items())
+
+    if ctx.args:
+        console.print(f"[dim]Using overrides: {ctx.args}[/dim]")
+        overrides.extend(ctx.args)
+
     try:
         job_ids = runner.run(target, overrides=overrides, dry_run=dry_run)
         if dry_run:
@@ -446,15 +475,126 @@ workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows."
 app.add_typer(workflow_app, name="workflow")
 
 
+def _show_workflow_help(target: str) -> None:
+    """Show help for a specific workflow based on its configuration."""
+    from omegaconf import OmegaConf
+    from devrun.runner import load_merged_config
+    from rich.panel import Panel
+    from rich.text import Text
+
+    # Register cross-stage resolver so ${stages:...} tokens don't error
+    if not OmegaConf.has_resolver("stages"):
+        OmegaConf.register_new_resolver(
+            "stages",
+            lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+        )
+
+    try:
+        raw = load_merged_config(target)
+    except FileNotFoundError:
+        console.print(f"[red]Error:[/red] No config found for workflow '{target}'.")
+        console.print("Ensure the workflow config exists in one of the config search directories.")
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[red]Failed to load configuration for '{target}':[/red] {e}")
+        raise typer.Exit(code=1)
+
+    workflow_name = raw.get("workflow", target)
+
+    console.print(Panel(f"Workflow: [bold cyan]{workflow_name}[/bold cyan]  (config: {target})", expand=False))
+    console.print()
+
+    # Workflow-level params
+    params = raw.get("params", {})
+    if params:
+        param_table = Table(title="Workflow Parameters", show_edge=False, title_justify="left", header_style="bold cyan")
+        param_table.add_column("Override")
+        param_table.add_column("Default Value")
+
+        for k, v in params.items():
+            val_str = str(v)
+            if val_str.startswith("<") and val_str.endswith(">"):
+                val_str = f"[yellow]{val_str}[/yellow]"
+            param_table.add_row(f"params.[bold]{k}[/bold]", val_str)
+
+        console.print(param_table)
+        console.print()
+
+    # Stages
+    import re as _re
+    _ref_pattern = _re.compile(r"<<STAGE_REF:([\w]+):([\w.]+)>>")
+
+    stages = raw.get("stages", [])
+    if stages:
+        stage_table = Table(title="Stages", show_edge=False, title_justify="left", header_style="bold cyan")
+        stage_table.add_column("Name")
+        stage_table.add_column("Task", style="cyan")
+        stage_table.add_column("Executor", style="green")
+        stage_table.add_column("Depends On", style="dim")
+        stage_table.add_column("Params", style="dim")
+
+        for s in stages:
+            deps = s.get("depends_on", None)
+            if isinstance(deps, list):
+                deps_str = ", ".join(deps)
+            elif deps:
+                deps_str = str(deps)
+            else:
+                deps_str = "—"
+            # Summarise params — show cross-stage refs with readable format
+            stage_params = s.get("params", {})
+            param_parts: list[str] = []
+            for pk, pv in list(stage_params.items())[:4]:
+                pv_str = str(pv)
+                # Format sentinel strings as readable cross-stage refs
+                pv_str = _ref_pattern.sub(r"stages.\1.\2", pv_str)
+                param_parts.append(f"{pk}={pv_str}")
+            extra = len(stage_params) - 4
+            if extra > 0:
+                param_parts.append(f"+{extra} more")
+            params_str = ", ".join(param_parts) if param_parts else "—"
+            stage_table.add_row(
+                s.get("name", "?"),
+                s.get("task", "?"),
+                s.get("executor", "?"),
+                deps_str,
+                params_str,
+            )
+
+        console.print(stage_table)
+        console.print()
+
+    # Note about auto-forwarded params
+    if any(s.get("depends_on") for s in stages):
+        console.print(
+            "[dim]Note: Params not listed for a stage may be auto-forwarded "
+            "from its dependencies at run time.[/dim]"
+        )
+        console.print()
+
+    # Usage example
+    console.print("[dim]Usage Example:[/dim]")
+    example_cmd = Text("devrun workflow run ", style="bold")
+    example_cmd.append(target, style="bold cyan")
+    if params:
+        first_param = next(iter(params.keys()))
+        example_cmd.append(f" params.{first_param}=value", style="green")
+    console.print(example_cmd)
+
+
 @workflow_app.command(
     "run",
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []},
 )
 def workflow_run(
     ctx: typer.Context,
-    target: str = typer.Argument(..., help="Workflow config path, name, or name/variation"),
+    target: Optional[str] = typer.Argument(None, help="Workflow config path, name, or name/variation"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
+    start_after: Optional[str] = typer.Option(None, "--start-after", help="Skip this stage and its dependencies, start from the next"),
+    from_job: Optional[str] = typer.Option(None, "--from-job", help="Extract workflow params from an existing job"),
+    detach: bool = typer.Option(False, "--detach", "-d", help="Run workflow in background, return immediately"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
     """Run a multi-stage workflow from a YAML config.
 
@@ -462,38 +602,154 @@ def workflow_run(
     or name/variation. Configs are resolved through the same hierarchical
     search path as task configs. Trailing arguments are OmegaConf overrides.
     """
+    if help:
+        if not target:
+            console.print(ctx.get_help())
+            raise typer.Exit()
+        else:
+            _show_workflow_help(target)
+            raise typer.Exit()
+
+    if not target:
+        console.print("[red]Missing argument 'TARGET'.[/red]\n")
+        console.print(ctx.get_help())
+        raise typer.Exit(code=2)
+
     _setup_logging(verbose)
 
-    from devrun.runner import load_merged_config
+    from omegaconf import OmegaConf
+    from devrun.runner import find_configs
+    import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
+    import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
     from devrun.models import WorkflowConfig
+    from devrun.workflow import WorkflowRunner
 
-    overrides = ctx.args
-    if overrides:
-        console.print(f"[dim]Using overrides: {overrides}[/dim]")
+    # Register the cross-stage reference resolver.  At config-load time it
+    # embeds a sentinel; WorkflowRunner resolves it at submit time.
+    if not OmegaConf.has_resolver("stages"):
+        OmegaConf.register_new_resolver(
+            "stages",
+            lambda stage_name, param_key: f"<<STAGE_REF:{stage_name}:{param_key}>>",
+        )
 
+    runner = WorkflowRunner()
+    task_name: Optional[str] = None
+    skipped_params: dict[str, dict] = {}
+
+    # Merge order: YAML base (hierarchical) → from-job params → CLI overrides (highest priority)
     try:
-        raw = load_merged_config(target, overrides=overrides)
+        config_paths = find_configs(target)
     except FileNotFoundError:
         console.print(f"[red]Error:[/red] Config not found for '{target}'.")
         console.print("Ensure the workflow config exists in one of the config search directories.")
         raise typer.Exit(code=1)
 
     try:
-        cfg = WorkflowConfig(**raw)
+        raw_cfg = OmegaConf.load(config_paths[0])
+        for extra_path in config_paths[1:]:
+            raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.load(extra_path))
+
+        if from_job:
+            # Peek at the raw config's stage tasks so negative-index lookups
+            # filter to history entries this workflow can actually consume.
+            allowed_tasks: set[str] = set()
+            raw_stages = OmegaConf.to_container(raw_cfg, resolve=False).get("stages", [])
+            if isinstance(raw_stages, list):
+                for st in raw_stages:
+                    if isinstance(st, dict) and st.get("task"):
+                        allowed_tasks.add(str(st["task"]))
+            try:
+                job_params, task_name, resolved_job_id = runner.extract_workflow_params(
+                    from_job, allowed_source_tasks=allowed_tasks or None
+                )
+            except ValueError as exc:
+                console.print(f"[red]Error:[/red] {exc}")
+                raise typer.Exit(code=1)
+            from_job = resolved_job_id  # propagate resolved ID downstream
+            if job_params:
+                console.print(f"[dim]From job {resolved_job_id} ({task_name}): {list(job_params.keys())}[/dim]")
+                job_overrides = [f"{k}={v}" for k, v in job_params.items()]
+                raw_cfg = OmegaConf.merge(raw_cfg, OmegaConf.from_dotlist(job_overrides))
+
+        if ctx.args:
+            console.print(f"[dim]Using overrides: {ctx.args}[/dim]")
+            for arg in ctx.args:
+                key, _, value = arg.partition("=")
+                if key and _ == "=":
+                    # Parse value type (e.g. "30" → int, "true" → bool)
+                    # so numeric/boolean overrides aren't stored as strings.
+                    parsed = yaml.safe_load(value)
+                    OmegaConf.update(raw_cfg, key, parsed)
+                else:
+                    console.print(f"[yellow]Warning:[/yellow] ignoring malformed override: {arg}")
+
+        resolved = OmegaConf.to_container(raw_cfg, resolve=True)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        console.print(f"[red]Error loading/resolving workflow config:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = WorkflowConfig(**resolved)
     except Exception as exc:
         console.print(f"[red]Error parsing workflow config:[/red] {exc}")
         raise typer.Exit(code=1)
 
-    from devrun.workflow import WorkflowRunner
+    # Auto-detect stage to skip when --from-job is used without --start-after,
+    # and populate skipped-stage resolved_params from the source job so that
+    # downstream ${stages:X,...} references resolve correctly regardless of
+    # whether --start-after was supplied explicitly or auto-detected.
+    if from_job and task_name is not None:
+        if not start_after:
+            detected_stage = runner.detect_stage_for_task(task_name, cfg)
+            if detected_stage:
+                start_after = detected_stage
+                console.print(
+                    f"[dim]Auto-detected: skipping stage '{detected_stage}' "
+                    f"based on job task type '{task_name}'[/dim]"
+                )
 
-    runner = WorkflowRunner()
-    result = runner.run(cfg, dry_run=dry_run)
+        # Find the stage whose task matches the source job; if the user gave
+        # an explicit --start-after for a different stage, we only seed
+        # skipped_params when the source-task stage is actually in the skip
+        # set (otherwise the params would belong to a stage that still runs).
+        if start_after:
+            source_stage = runner.detect_stage_for_task(task_name, cfg)
+            if source_stage:
+                record = runner._db.get(from_job)
+                if record is not None:
+                    skipped_params[source_stage] = record.params_dict
 
-    if dry_run:
-        console.print(result)
-        console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
-    else:
-        console.print(f"[green]Workflow completed:[/green] {result}")
+    try:
+        if detach:
+            if dry_run:
+                console.print("[red]Error:[/red] --detach and --dry-run cannot be used together.")
+                raise typer.Exit(code=1)
+            wf_id = runner.run_detached(
+                cfg,
+                start_after=start_after,
+                skipped_params=skipped_params or None,
+            )
+            console.print(
+                f"[green]Workflow {wf_id} started in background.[/green]\n"
+                f"Use [bold]devrun workflow status {wf_id}[/bold] to monitor."
+            )
+        else:
+            result = runner.run(
+                cfg,
+                dry_run=dry_run,
+                start_after=start_after,
+                skipped_params=skipped_params or None,
+            )
+            if dry_run:
+                console.print(result)
+                console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
+            else:
+                console.print(f"[green]Workflow completed:[/green] {result}")
+    except ValueError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=1)
 
 
 @workflow_app.command("status")
