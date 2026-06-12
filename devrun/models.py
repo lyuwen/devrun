@@ -156,11 +156,16 @@ class JobRecord(BaseModel):
     task_name: str
     executor: str
     parameters: str = ""  # JSON-encoded params
+    params_template: str | None = None
     remote_job_id: str | None = None
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     log_path: str | None = None
+    skip_reason: str | None = None
+    claimed_by: str | None = None
+    claimed_at: str | None = None
+    claim_expires_at: str | None = None
 
     # Convenience helpers ------------------------------------------------
 

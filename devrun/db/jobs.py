@@ -260,11 +260,16 @@ class JobStore:
             task_name=d["task_name"],
             executor=d["executor"],
             parameters=d.get("parameters", ""),
+            params_template=d.get("params_template"),
             remote_job_id=d.get("remote_job_id"),
             status=d.get("status", "pending"),
             created_at=d["created_at"],
             completed_at=d.get("completed_at"),
             log_path=d.get("log_path"),
+            skip_reason=d.get("skip_reason"),
+            claimed_by=d.get("claimed_by"),
+            claimed_at=d.get("claimed_at"),
+            claim_expires_at=d.get("claim_expires_at"),
         )
 
     # ---- workflow mutations -------------------------------------------------
@@ -508,18 +513,19 @@ class JobStore:
     # ---- heartbeat read/write helpers --------------------------------------
 
     def cascade_skip_dependents(self) -> list[str]:
-        """Transition QUEUED children whose blocking parent is failed/skipped/cancelled."""
+        """Transition QUEUED children whose blocking parent is failed/skipped/cancelled/timed_out."""
         rows = self._conn.execute(
             "SELECT DISTINCT j.job_id, p.job_id AS parent_id, p.status AS parent_status "
             "FROM jobs j "
             "JOIN job_dependencies d ON d.child_job_id = j.job_id "
             "JOIN jobs p ON p.job_id = d.parent_job_id "
-            "WHERE j.status = ? AND d.allow_failure = 0 AND p.status IN (?, ?, ?)",
+            "WHERE j.status = ? AND d.allow_failure = 0 AND p.status IN (?, ?, ?, ?)",
             (
                 JobStatus.QUEUED.value,
                 JobStatus.FAILED.value,
                 JobStatus.SKIPPED.value,
                 JobStatus.CANCELLED.value,
+                JobStatus.TIMED_OUT.value,
             ),
         ).fetchall()
         if not rows:
