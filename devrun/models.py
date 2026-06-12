@@ -19,11 +19,15 @@ class JobStatus(str, Enum):
     """Lifecycle states for a job."""
 
     PENDING = "pending"
+    QUEUED = "queued"
+    SUBMITTING = "submitting"
     SUBMITTED = "submitted"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELING = "canceling"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
     UNKNOWN = "unknown"
 
 
