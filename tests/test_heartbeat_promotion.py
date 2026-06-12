@@ -117,3 +117,104 @@ def test_promotion_skips_when_dependencies_unsatisfied(tmp_path: Path):
     rec_child = db.get(child)
     assert rec_child is not None
     assert JobStatus(rec_child.status) == JobStatus.QUEUED
+
+
+# ============================================================================
+# Task 4 — Promotion failure paths
+# ============================================================================
+
+
+class _RaisingExecutor(_FakeExecutor):
+    """Executor whose submit_with_retry always raises."""
+
+    def __init__(self, exc: Exception):
+        super().__init__()
+        self._exc = exc
+
+    def submit_with_retry(self, spec, retries: int = 3, retry_delay: float = 5.0):
+        raise self._exc
+
+
+def test_promotion_required_placeholder_fails(tmp_path: Path):
+    """An unfilled <REQUIRED:...> marker → FAILED with skip_reason naming REQUIRED."""
+    db = JobStore(tmp_path / "jobs.db")
+    router = _FakeRouter(_FakeExecutor())
+
+    jid = db.enqueue(
+        task_name="eval",
+        executor="local",
+        params_template="model: <REQUIRED: model name>\n",
+        parameters={"model": "<REQUIRED: model name>"},
+    )
+
+    tick(db, executor_router=router)
+
+    rec = db.get(jid)
+    assert rec is not None
+    assert JobStatus(rec.status) == JobStatus.FAILED
+    assert rec.skip_reason is not None
+    assert "REQUIRED" in rec.skip_reason
+
+
+def test_promotion_unauthorized_jobref_fails(tmp_path: Path):
+    """A ${jobs:...} reference to a job with no declared dep edge → FAILED."""
+    db = JobStore(tmp_path / "jobs.db")
+    router = _FakeRouter(_FakeExecutor())
+
+    jid = db.enqueue(
+        task_name="eval",
+        executor="local",
+        params_template="model: ${jobs:nope,model}\n",
+        parameters={},
+    )
+
+    tick(db, executor_router=router)
+
+    rec = db.get(jid)
+    assert rec is not None
+    assert JobStatus(rec.status) == JobStatus.FAILED
+    assert rec.skip_reason is not None and rec.skip_reason != ""
+
+
+def test_promotion_executor_submit_raises(tmp_path: Path):
+    """executor.submit_with_retry raising → FAILED with the exception text in skip_reason."""
+    db = JobStore(tmp_path / "jobs.db")
+    router = _FakeRouter(_RaisingExecutor(RuntimeError("boom")))
+
+    jid = db.enqueue(
+        task_name="eval",
+        executor="local",
+        params_template="model: gpt-4\n",
+        parameters={"model": "gpt-4"},
+    )
+
+    tick(db, executor_router=router)
+
+    rec = db.get(jid)
+    assert rec is not None
+    assert JobStatus(rec.status) == JobStatus.FAILED
+    assert rec.skip_reason is not None
+    assert "boom" in rec.skip_reason
+
+
+def test_promotion_failure_clears_claim_columns(tmp_path: Path):
+    """After fail_promotion, claim_by / claim_expires_at must be cleared."""
+    db = JobStore(tmp_path / "jobs.db")
+    router = _FakeRouter(_RaisingExecutor(RuntimeError("nope")))
+
+    jid = db.enqueue(
+        task_name="eval",
+        executor="local",
+        params_template="model: gpt-4\n",
+        parameters={"model": "gpt-4"},
+    )
+
+    tick(db, executor_router=router)
+
+    row = db._conn.execute(
+        "SELECT claimed_by, claimed_at, claim_expires_at FROM jobs WHERE job_id=?",
+        (jid,),
+    ).fetchone()
+    assert row["claimed_by"] is None
+    assert row["claimed_at"] is None
+    assert row["claim_expires_at"] is None
