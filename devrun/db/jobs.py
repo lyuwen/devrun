@@ -421,5 +421,89 @@ class JobStore:
             for r in rows
         ]
 
+    # ---- atomic claim & recovery -------------------------------------------
+
+    def claim_for_submit(
+        self,
+        *,
+        job_id: str,
+        instance_id: str,
+        lease_seconds: int,
+    ) -> bool:
+        """Compare-and-set QUEUED -> SUBMITTING. Returns True only for the winner."""
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=lease_seconds)
+        cursor = self._conn.execute(
+            "UPDATE jobs SET status = ?, claimed_by = ?, claimed_at = ?, claim_expires_at = ? "
+            "WHERE job_id = ? AND status = ?",
+            (
+                JobStatus.SUBMITTING.value,
+                instance_id,
+                now.isoformat(),
+                expires.isoformat(),
+                job_id,
+                JobStatus.QUEUED.value,
+            ),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def finalize_submit(
+        self,
+        *,
+        job_id: str,
+        remote_job_id: str | None,
+        log_path: str | None,
+        resolved_parameters: dict[str, Any],
+    ) -> None:
+        """Transition SUBMITTING -> SUBMITTED and persist resolved fields + clear claim."""
+        self._conn.execute(
+            "UPDATE jobs SET status = ?, remote_job_id = ?, log_path = ?, parameters = ?, "
+            "claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL "
+            "WHERE job_id = ? AND status = ?",
+            (
+                JobStatus.SUBMITTED.value,
+                remote_job_id,
+                log_path,
+                json.dumps(resolved_parameters),
+                job_id,
+                JobStatus.SUBMITTING.value,
+            ),
+        )
+        self._conn.commit()
+
+    def fail_promotion(self, *, job_id: str, skip_reason: str) -> None:
+        """Mark job FAILED with *skip_reason*, clearing claim columns."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "UPDATE jobs SET status = ?, skip_reason = COALESCE(skip_reason || ' ; ', '') || ?, "
+            "claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, "
+            "completed_at = ? WHERE job_id = ?",
+            (JobStatus.FAILED.value, skip_reason, now, job_id),
+        )
+        self._conn.commit()
+
+    def reclaim_expired_leases(self, *, now: datetime) -> list[str]:
+        """Reclaim SUBMITTING rows whose lease has expired and have no remote_job_id."""
+        now_iso = now.isoformat()
+        rows = self._conn.execute(
+            "SELECT job_id FROM jobs WHERE status = ? AND claim_expires_at < ? "
+            "AND remote_job_id IS NULL",
+            (JobStatus.SUBMITTING.value, now_iso),
+        ).fetchall()
+        reclaimed = [r["job_id"] for r in rows]
+        if not reclaimed:
+            return []
+        self._conn.execute(
+            "UPDATE jobs SET status = ?, claimed_by = NULL, claimed_at = NULL, "
+            "claim_expires_at = NULL, "
+            "skip_reason = COALESCE(skip_reason || ' ; ', '') || 'reclaimed after stale lease' "
+            "WHERE status = ? AND claim_expires_at < ? AND remote_job_id IS NULL",
+            (JobStatus.QUEUED.value, JobStatus.SUBMITTING.value, now_iso),
+        )
+        self._conn.commit()
+        logger.info("Reclaimed %d expired lease(s): %s", len(reclaimed), reclaimed)
+        return reclaimed
+
     def close(self) -> None:
         self._conn.close()
