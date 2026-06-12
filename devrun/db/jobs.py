@@ -505,5 +505,88 @@ class JobStore:
         logger.info("Reclaimed %d expired lease(s): %s", len(reclaimed), reclaimed)
         return reclaimed
 
+    # ---- heartbeat read/write helpers --------------------------------------
+
+    def cascade_skip_dependents(self) -> list[str]:
+        """Transition QUEUED children whose blocking parent is failed/skipped/cancelled."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT j.job_id, p.job_id AS parent_id, p.status AS parent_status "
+            "FROM jobs j "
+            "JOIN job_dependencies d ON d.child_job_id = j.job_id "
+            "JOIN jobs p ON p.job_id = d.parent_job_id "
+            "WHERE j.status = ? AND d.allow_failure = 0 AND p.status IN (?, ?, ?)",
+            (
+                JobStatus.QUEUED.value,
+                JobStatus.FAILED.value,
+                JobStatus.SKIPPED.value,
+                JobStatus.CANCELLED.value,
+            ),
+        ).fetchall()
+        if not rows:
+            return []
+        now = datetime.now(timezone.utc).isoformat()
+        skipped: list[str] = []
+        for r in rows:
+            child_id = r["job_id"]
+            reason = f"parent {r['parent_id']} {r['parent_status']}"
+            cursor = self._conn.execute(
+                "UPDATE jobs SET status = ?, skip_reason = ?, completed_at = ? "
+                "WHERE job_id = ? AND status = ?",
+                (JobStatus.SKIPPED.value, reason, now, child_id, JobStatus.QUEUED.value),
+            )
+            if cursor.rowcount == 1:
+                skipped.append(child_id)
+        self._conn.commit()
+        if skipped:
+            logger.info("Cascade-skipped %d job(s): %s", len(skipped), skipped)
+        return skipped
+
+    def fetch_ready_queued(self, limit: int = 100) -> list[JobRecord]:
+        """Return QUEUED jobs whose every parent edge is satisfied."""
+        rows = self._conn.execute(
+            "SELECT * FROM jobs j WHERE j.status = ? AND NOT EXISTS ("
+            "  SELECT 1 FROM job_dependencies d "
+            "  JOIN jobs p ON p.job_id = d.parent_job_id "
+            "  WHERE d.child_job_id = j.job_id "
+            "    AND NOT (p.status = ? OR (d.allow_failure = 1 AND p.status IN (?, ?, ?)))"
+            ") ORDER BY j.created_at LIMIT ?",
+            (
+                JobStatus.QUEUED.value,
+                JobStatus.COMPLETED.value,
+                JobStatus.FAILED.value,
+                JobStatus.SKIPPED.value,
+                JobStatus.CANCELLED.value,
+                limit,
+            ),
+        ).fetchall()
+        return [self._row_to_record(r) for r in rows]
+
+    def fetch_active_jobs(self) -> list[JobRecord]:
+        """Return jobs in submitted / running / canceling states."""
+        rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE status IN (?, ?, ?)",
+            (
+                JobStatus.SUBMITTED.value,
+                JobStatus.RUNNING.value,
+                JobStatus.CANCELING.value,
+            ),
+        ).fetchall()
+        return [self._row_to_record(r) for r in rows]
+
+    def get_parent_parameters(self, child_job_id: str) -> dict[str, dict[str, Any]]:
+        """Return {parent_job_id: parsed_parameters_dict} for every dep edge of *child_job_id*."""
+        rows = self._conn.execute(
+            "SELECT p.job_id AS pid, p.parameters AS params "
+            "FROM job_dependencies d "
+            "JOIN jobs p ON p.job_id = d.parent_job_id "
+            "WHERE d.child_job_id = ?",
+            (child_job_id,),
+        ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            raw = r["params"]
+            result[r["pid"]] = json.loads(raw) if raw else {}
+        return result
+
     def close(self) -> None:
         self._conn.close()
