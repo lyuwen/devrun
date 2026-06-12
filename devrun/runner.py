@@ -77,18 +77,20 @@ def find_configs(target: str, config_dirs: list[Path] | None = None) -> list[Pat
     return found
 
 
-def load_merged_config(
+def load_merged_omegaconf(
     target: str,
     overrides: list[str] | None = None,
     config_dirs: list[Path] | None = None,
-) -> dict:
+):
     """Load config files for *target*, deep-merge via OmegaConf, apply overrides.
 
-    Returns the resolved config as a plain dict (not model-validated).
+    Returns the merged ``DictConfig`` without resolving interpolations. Use
+    this when you need to preserve ``${...}`` references for later resolution.
     """
     from omegaconf import OmegaConf
     import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
     import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
+    import devrun.jobref  # noqa: F401  — registers ${jobs:…} resolver
 
     config_paths = find_configs(target, config_dirs)
     logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
@@ -100,6 +102,21 @@ def load_merged_config(
     if overrides:
         merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.from_dotlist(overrides))
 
+    return merged_cfg
+
+
+def load_merged_config(
+    target: str,
+    overrides: list[str] | None = None,
+    config_dirs: list[Path] | None = None,
+) -> dict:
+    """Load config files for *target*, deep-merge via OmegaConf, apply overrides.
+
+    Returns the resolved config as a plain dict (not model-validated).
+    """
+    from omegaconf import OmegaConf
+
+    merged_cfg = load_merged_omegaconf(target, overrides, config_dirs)
     return OmegaConf.to_container(merged_cfg, resolve=True)
 
 
