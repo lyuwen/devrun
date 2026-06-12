@@ -132,6 +132,53 @@ class JobStore:
         logger.info("Inserted job %s (task=%s, executor=%s)", job_id, task_name, executor)
         return job_id
 
+    def enqueue(
+        self,
+        *,
+        task_name: str,
+        executor: str,
+        params_template: str,
+        parameters: dict[str, Any] | None = None,
+        initial_status: JobStatus = JobStatus.QUEUED,
+    ) -> str:
+        """Enqueue a new job with unresolved params_template."""
+        job_id = uuid.uuid4().hex[:12]
+        now = datetime.now(timezone.utc).isoformat()
+        status_value = initial_status.value if isinstance(initial_status, JobStatus) else initial_status
+        self._conn.execute(
+            "INSERT INTO jobs (job_id, task_name, executor, params_template, parameters, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                task_name,
+                executor,
+                params_template,
+                json.dumps(parameters or {}),
+                status_value,
+                now,
+            ),
+        )
+        self._conn.commit()
+        logger.info(
+            "Enqueued job %s (task=%s, executor=%s, status=%s)",
+            job_id, task_name, executor, status_value,
+        )
+        return job_id
+
+    def insert_dependency(
+        self,
+        *,
+        child_job_id: str,
+        parent_job_id: str,
+        allow_failure: bool,
+    ) -> None:
+        """Insert a job dependency edge."""
+        self._conn.execute(
+            "INSERT INTO job_dependencies (child_job_id, parent_job_id, allow_failure) VALUES (?, ?, ?)",
+            (child_job_id, parent_job_id, 1 if allow_failure else 0),
+        )
+        self._conn.commit()
+
     def update_status(
         self,
         job_id: str,
