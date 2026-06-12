@@ -24,3 +24,4 @@ dist/
 build/
 *.egg-info/
 devrun.code-workspace
+.worktrees/
