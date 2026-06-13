@@ -175,6 +175,12 @@ def run(
         raise typer.Exit(code=2)
 
     _setup_logging(verbose)
+
+    # Validate --allow-failure-from requires --after
+    if allow_failure_from and not after:
+        console.print("[red]Error:[/red] --allow-failure-from requires at least one --after parent.")
+        raise typer.Exit(code=1)
+
     runner = _runner()
 
     # Merge order: YAML base → from-job imported params → CLI trailing overrides.
@@ -221,6 +227,16 @@ def run(
         else:
             for jid in job_ids:
                 console.print(f"[green]✓[/green] Job queued: [bold]{jid}[/bold]")
+            # Check if heartbeat service is running
+            try:
+                from devrun.services import get_service
+                service = get_service()
+                if not service.is_active():
+                    console.print("[yellow]⚠ Warning:[/yellow] Heartbeat scheduler is not running. Jobs will remain in QUEUED state.")
+                    console.print("  Start it with: [bold]devrun heartbeat start[/bold]")
+            except Exception:
+                # Silently skip warning if service check fails
+                pass
     except ValueError as exc:
         console.print(f"[red]✗ Error:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -796,6 +812,16 @@ def workflow_run(
             console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
         else:
             console.print(f"[green]Workflow enqueued:[/green] {result}")
+            # Check if heartbeat service is running
+            try:
+                from devrun.services import get_service
+                service = get_service()
+                if not service.is_active():
+                    console.print("[yellow]⚠ Warning:[/yellow] Heartbeat scheduler is not running. Jobs will remain in QUEUED state.")
+                    console.print("  Start it with: [bold]devrun heartbeat start[/bold]")
+            except Exception:
+                # Silently skip warning if service check fails
+                pass
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)
