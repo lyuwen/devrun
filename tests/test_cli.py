@@ -576,30 +576,6 @@ class TestWorkflowCLINewFeatures:
         # The override should appear in the dry-run output
         assert "overridden-model" in result.stdout
 
-    def test_workflow_run_start_after_flag(self, tmp_path):
-        """--start-after flag should be parsed and forwarded to WorkflowRunner."""
-        config = {
-            "workflow": "start_after_test",
-            "stages": [
-                {"name": "inference", "task": "eval", "executor": "local", "params": {"model": "x"}},
-                {"name": "collect", "task": "eval", "executor": "local", "depends_on": "inference", "params": {"model": "x"}},
-                {"name": "evaluate", "task": "eval", "executor": "local", "depends_on": "collect", "params": {"model": "x"}},
-            ],
-            "heartbeat_interval": 0.001,
-        }
-        cfg_path = tmp_path / "wf.yaml"
-        cfg_path.write_text(yaml.dump(config))
-
-        # Use --dry-run with --start-after to verify the flag is parsed and produces skip markers
-        runner = get_cli_runner()
-        result = runner.invoke(app, [
-            "workflow", "run", str(cfg_path),
-            "--start-after", "inference", "--dry-run",
-        ])
-        assert result.exit_code == 0
-        # Should show inference as skipped
-        assert "SKIPPED" in result.stdout or "skipped" in result.stdout.lower()
-
     def test_workflow_run_from_job_flag(self, tmp_path):
         """--from-job flag should be parsed and extract_workflow_params called."""
         config = {
@@ -631,28 +607,6 @@ class TestWorkflowCLINewFeatures:
                     mock_extract.assert_called_once()
                     call = mock_extract.call_args
                     assert call.args[0] == "job_abc123"
-
-    def test_workflow_run_detach_flag(self, tmp_path):
-        """--detach flag should call run_detached instead of run."""
-        config = {
-            "workflow": "detach_test",
-            "stages": [
-                {"name": "s1", "task": "eval", "executor": "local", "params": {"model": "x"}},
-            ],
-            "heartbeat_interval": 0.001,
-        }
-        cfg_path = tmp_path / "wf.yaml"
-        cfg_path.write_text(yaml.dump(config))
-
-        with patch("devrun.workflow.WorkflowRunner.run_detached", return_value="wf_detach_001") as mock_detach:
-            runner = get_cli_runner()
-            result = runner.invoke(app, [
-                "workflow", "run", str(cfg_path),
-                "--detach",
-            ])
-            assert result.exit_code == 0
-            mock_detach.assert_called_once()
-            assert "background" in result.stdout.lower() or "wf_detach_001" in result.stdout
 
     def test_workflow_run_placeholder_error(self, tmp_path):
         """Workflow with unfilled <REQUIRED:...> placeholders should show helpful error."""

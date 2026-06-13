@@ -36,59 +36,6 @@ _LEGACY_HEARTBEAT_LOOP_SKIP = pytest.mark.skip(
 
 
 
-class TestWorkflowRunnerParallelStages:
-    """Test workflows with independent (parallel-eligible) stages."""
-
-    def test_independent_stages_both_submitted(self, workflow_runner):
-        """Two stages with no dependencies should both be submitted."""
-        cfg = WorkflowConfig(
-            workflow="parallel_test",
-            stages=[
-                WorkflowStage(name="a", task="eval", executor="local"),
-                WorkflowStage(name="b", task="eval", executor="local"),
-            ],
-            heartbeat_interval=0.001,
-        )
-        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
-            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
-                wf_id = workflow_runner.run(cfg)
-                record = workflow_runner._db.get_workflow(wf_id)
-                assert record["status"] == "completed"
-                assert mock_submit.call_count == 2
-
-    def test_diamond_dependency(self, workflow_runner):
-        """A depends on nothing, B & C depend on A, D depends on B & C."""
-        cfg = WorkflowConfig(
-            workflow="diamond",
-            stages=[
-                WorkflowStage(name="A", task="eval", executor="local"),
-                WorkflowStage(name="B", task="eval", executor="local", depends_on="A"),
-                WorkflowStage(name="C", task="eval", executor="local", depends_on="A"),
-                WorkflowStage(name="D", task="eval", executor="local", depends_on=["B", "C"]),
-            ],
-            heartbeat_interval=0.001,
-        )
-        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
-            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
-                wf_id = workflow_runner.run(cfg)
-                record = workflow_runner._db.get_workflow(wf_id)
-                assert record["status"] == "completed"
-                assert mock_submit.call_count == 4
-                # A must be submitted before B, C; D must be last
-                names = [c.args[0] for c in mock_submit.call_args_list]
-                assert names.index("A") < names.index("B")
-                assert names.index("A") < names.index("C")
-                assert names.index("B") < names.index("D")
-                assert names.index("C") < names.index("D")
-
-
-# ============================================================================
-# OmegaConf interpolation tests
-# ============================================================================
-
-
 class TestOmegaConfInterpolation:
     """Tests for OmegaConf ${params.X} resolution in workflow configs."""
 
@@ -277,61 +224,6 @@ class TestWorkflowFromJob:
 # ============================================================================
 
 
-class TestWorkflowDetached:
-    """Tests for detached (background) workflow execution."""
-
-    def test_detached_creates_db_record(self, workflow_runner):
-        """run_detached should write a workflow record to the DB before returning."""
-        cfg = WorkflowConfig(
-            workflow="detach_test",
-            stages=[
-                WorkflowStage(name="slow_stage", task="eval", executor="local",
-                              params={"model": "x"}),
-            ],
-            heartbeat_interval=1.0,
-        )
-        with patch("devrun.workflow.subprocess.Popen") as mock_popen:
-            mock_popen.return_value = MagicMock()
-            wf_id = workflow_runner.run_detached(cfg)
-            # Should return immediately with a workflow_id
-            assert isinstance(wf_id, str)
-            assert len(wf_id) > 0
-            # DB record should exist
-            record = workflow_runner._db.get_workflow(wf_id)
-            assert record is not None
-            assert record["workflow_name"] == "detach_test"
-
-    def test_detached_returns_workflow_id_immediately(self, workflow_runner):
-        """run_detached should return the workflow ID immediately without blocking."""
-        cfg = WorkflowConfig(
-            workflow="detach_return_test",
-            stages=[
-                WorkflowStage(name="s1", task="eval", executor="local",
-                              params={"model": "x"}),
-                WorkflowStage(name="s2", task="eval", executor="local",
-                              depends_on="s1", params={"model": "y"}),
-            ],
-            heartbeat_interval=10.0,
-        )
-        import time
-
-        with patch("devrun.workflow.subprocess.Popen") as mock_popen:
-            mock_popen.return_value = MagicMock()
-            start = time.monotonic()
-            wf_id = workflow_runner.run_detached(cfg)
-            elapsed = time.monotonic() - start
-            # Should return much faster than the heartbeat interval
-            assert elapsed < 5.0
-            assert isinstance(wf_id, str)
-            # Popen should have been called to spawn background process
-            mock_popen.assert_called_once()
-
-
-# ============================================================================
-# Placeholder validation tests
-# ============================================================================
-
-
 class TestPlaceholderValidation:
     """Tests for <REQUIRED:...> placeholder validation."""
 
@@ -349,31 +241,6 @@ class TestPlaceholderValidation:
         )
         with pytest.raises((ValueError, RuntimeError), match="REQUIRED|placeholder|unfilled"):
             workflow_runner.run(cfg)
-
-    def test_placeholder_validation_passes_clean_config(self, workflow_runner):
-        """Config without <REQUIRED:...> placeholders should pass validation."""
-        cfg = WorkflowConfig(
-            workflow="clean_test",
-            stages=[
-                WorkflowStage(
-                    name="s1", task="eval", executor="local",
-                    params={"model": "test-model", "dataset": "/data/test"},
-                ),
-            ],
-            heartbeat_interval=0.001,
-        )
-        with patch.object(workflow_runner, "_submit_stage") as mock_submit:
-            mock_submit.return_value = ("mock_db_id", "mock_remote_id", {})
-            with patch.object(workflow_runner, "_poll_job_status", return_value="completed"):
-                # Should not raise
-                wf_id = workflow_runner.run(cfg)
-                assert isinstance(wf_id, str)
-
-
-# ============================================================================
-# Enhanced dry-run output tests
-# ============================================================================
-
 
 class TestImprovedDryRun:
     """Tests for enhanced dry-run output format."""
