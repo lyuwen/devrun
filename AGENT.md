@@ -31,6 +31,9 @@ All interactions are driven entirely by YAML configuration files.
 * **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). All four Typer apps (main, workflow, keys, presets) set `no_args_is_help=True` so invoking any group without arguments displays its help text. Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. `devrun list` discovers and displays both task configs and workflow configs (those with a `workflow` top-level key), showing each entry's type accordingly. Both `devrun run` and `devrun workflow run` accept `--from-job <job_id>` to import params from a previous job; the source job's params are translated to the target's schema (via `BaseTask.import_from_job` for tasks, `_PARAM_MAPPING` for workflows) and merged before CLI overrides. The job id may also be a negative integer (`-1`, `-2`, …) referring to the N-th most recent compatible job in history — for `devrun run` "compatible" means the source task's params translate via the target's `import_from_job`; for `workflow run` it means the source task matches at least one stage of the workflow. `workflow run` accepts a target as a name, name/variation, or literal file path, using the same hierarchical config resolution as task configs via `load_merged_config()` (3-layer merge: repo defaults < user overrides < project overrides). It also accepts `--start-after <stage>` to skip completed stages, `--detach/-d` for background execution, `--dry-run` for plan preview, and trailing OmegaConf overrides (e.g. `params.model_name=X`). Merge order for both `run` and `workflow run`: YAML base → from-job params → CLI overrides.
 * **`devrun/db/jobs.py`:** Persistent SQLite job store with both `jobs` and `workflows` tables.
 * **`devrun/workflow.py`:** Multi-stage workflow engine with heartbeat-based polling, dependency resolution, timeout handling, and dry-run mode. Orchestrates stage transitions through pending → submitted → running → completed/failed/skipped/skipped_by_user. Supports `start_after` to skip stages and their transitive dependencies, `run_detached()` for background execution, `extract_workflow_params()` to pull params from existing jobs, and `<REQUIRED:…>` placeholder validation before submission. Workflow configs now go through the same hierarchical search and OmegaConf merge pipeline as task configs, via `load_merged_config()` in the CLI layer. The `WorkflowRunner` class itself is unchanged -- it still receives a fully-parsed `WorkflowConfig`.
+* **`devrun/heartbeat.py`:** Global scheduler. Loops `tick()` at a configurable interval. Each tick runs five phases in order: stale-lease reclaim, workflow-deadline expiry, cascade-skip of dependents, promotion of ready `QUEUED` jobs (claim CAS → resolve params with `JobRefContext` → executor submit → `finalize_submit`), and poll of active jobs. PR2 lands the scheduler; producers still use legacy paths until PR3.
+* **`devrun/services/`:** Cross-platform service management. `get_service()` dispatches on `sys.platform` to `SystemdUserService` (Linux, `systemctl --user`) or `LaunchdService` (macOS, `launchctl` + LaunchAgent plist). Both implement `install/uninstall/start/stop/restart/is_active`.
+* **`devrun/cli_heartbeat.py`:** Typer subapp wired as `devrun heartbeat`. Subcommands: foreground (default), `install`, `uninstall`, `start`, `stop`, `restart`, `status`.
 * **`devrun/utils/templates.py`:** Jinja2 template rendering utility with `shell_quote` filter (`shlex.quote`) and `StrictUndefined` mode. Templates live in `devrun/templates/`.
 * **`devrun/utils/swebench.py`:** Shared SWE-bench utilities including `derive_ds_dir()` for consistent DS_DIR path naming across tasks.
 * **`configs/`:** Example YAML configurations for execution (`executors.yaml`), deployment (`deploy_ray.yaml`), and logic (`eval_math.yaml`, `eval_sweep.yaml`, `inference.yaml`).
@@ -70,6 +73,26 @@ Columns: `child_job_id`, `parent_job_id`, `allow_failure`
 
 Table: `workflow_jobs`
 Columns: `workflow_id`, `stage_name`, `ordinal`, `job_id`, `source_job_id`
+
+## Heartbeat Scheduler
+
+The global heartbeat scheduler (`devrun heartbeat`) drains the `QUEUED` job queue through the dependency-aware promotion pipeline. It runs as a background service (systemd `--user` on Linux, launchd LaunchAgent on macOS) and executes a five-phase tick every 10 seconds:
+
+1. **Reclaim stale leases** — `claim_expires_at < now` SUBMITTING rows with no `remote_job_id` are returned to QUEUED with a `skip_reason` annotation.
+2. **Expire workflow deadlines** — workflows past `deadline_at` get every non-terminal job transitioned (QUEUED→SKIPPED, SUBMITTED/RUNNING→CANCELING) and the workflow row → TIMED_OUT.
+3. **Cascade-skip dependents** — children whose blocking parent (`allow_failure=0`) reached a terminal failure state (failed/skipped/cancelled/timed_out) are flipped to SKIPPED with `skip_reason='parent <id> <status>'`.
+4. **Promote ready-queued** — for each QUEUED job whose every parent edge is satisfied: claim CAS to SUBMITTING, install a `JobRefContext`, resolve `${jobs:<id>,<path>}` references via OmegaConf, scan for residual `<REQUIRED:…>`, prepare the task, submit via the executor router, and atomically `finalize_submit` to SUBMITTED with the resolved parameters + remote_job_id + log_path persisted.
+5. **Poll active jobs** — SUBMITTED/RUNNING/CANCELING rows have `executor.status()` polled and remapped through `map_status()`; CANCELING entries call `executor.cancel(remote_id)` then unconditionally transition to CANCELLED.
+
+CLI surface:
+- `devrun heartbeat` — foreground loop (refuses when the managed service is already active).
+- `devrun heartbeat run` — foreground loop alias that skips the service-active guard (user-supervised).
+- `devrun heartbeat install` — write the service unit/plist and enable it (resolves `python_path=sys.executable`, `db_path=default_db_path()`).
+- `devrun heartbeat start|stop|restart` — delegate to the platform service backend.
+- `devrun heartbeat status` — print `is_active()`, job-status counts (via `JobStore.status_counts()`), and the last-tick timestamp from `~/.devrun/heartbeat.tick`.
+- `devrun heartbeat uninstall` — stop, disable, remove the unit/plist, daemon-reload.
+
+Service files: `~/.config/systemd/user/devrun-heartbeat.service` (Linux) or `~/Library/LaunchAgents/com.devrun.heartbeat.plist` (macOS). The systemd unit ExecStart is `{{ python_path }} -m devrun.heartbeat --db {{ db_path }}` with `Restart=on-failure` and `KillSignal=SIGTERM` so `_shutdown_event` unwinds cleanly after the current tick. PR2 lands the scheduler and CLI; producers (`devrun run`, `devrun workflow run`) still use legacy in-process polling — that flips in PR3.
 
 ## Development Specifics
 
@@ -133,11 +156,19 @@ python -m pytest tests/ -v
 | `test_workflow_models.py` | Unit tests for WorkflowStage and WorkflowConfig Pydantic models |
 | `test_workflow.py` | Unit tests for WorkflowRunner: dependency ordering, failure handling, timeout, cancel, logs |
 | `test_workflow_simulation.py` | Simulation tests verifying full execution plan consistency across stages |
+| `test_heartbeat_loop.py` | `tick()` no-op against empty DB, poll-active phase status transitions (SUBMITTED→RUNNING, RUNNING→COMPLETED/FAILED), skip of QUEUED/terminal jobs, executor-status exception is swallowed |
+| `test_heartbeat_cascade.py` | Cascade-skip across ticks: single-hop, allow_failure respected, multi-hop A→B→C across two ticks, idempotency |
+| `test_heartbeat_promotion.py` | Promotion phase: QUEUED→SUBMITTED happy path, resolved-params persisted, blocked-by-dependency skip; failure paths (unfilled `<REQUIRED:…>`, unauthorized `${jobs:…}` ref, executor.submit_with_retry raises, claim columns cleared on failure) |
+| `test_heartbeat_claim.py` | Lease reclaim: expired SUBMITTING + NULL remote_job_id → QUEUED with `skip_reason` annotation, rows with remote_job_id are untouched, live lease is untouched |
+| `test_heartbeat_timeout.py` | Workflow deadline expiry across a tick: QUEUED→SKIPPED, SUBMITTED/RUNNING→CANCELING, workflow→TIMED_OUT |
+| `test_heartbeat_cancel.py` | CANCELING → CANCELLED after executor.cancel(); executor.cancel() raising still finalizes CANCELLED; cancel branch does not call status(); plain RUNNING jobs are untouched |
+| `test_heartbeat_service.py` | systemd + launchd backends with mocked subprocess: platform dispatch, install path + daemon-reload + enable, start/stop/restart, uninstall flow, is_active returncode mapping |
+| `test_cli_heartbeat.py` | `devrun heartbeat` Typer subapp: `--help`, `status` against isolated DB, foreground refusal when service is active, install kwargs forwarding, start/stop/restart/uninstall delegation |
 | `test_data/sample_configs/` | Sample YAML config files for testing |
 
 ### Test Coverage
 
-- **845 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
+- **895 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
 - Unit tests for all major components (models, registry, database, router, runner, tasks, executors, workflow engine)
 - Integration tests between modules
 - End-to-end workflow tests
