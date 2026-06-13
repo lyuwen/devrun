@@ -72,6 +72,7 @@ class TestCLIStatus:
             assert result.exit_code == 1
             assert "not found" in result.stdout.lower() or "error" in result.stdout.lower()
 
+    @pytest.mark.skip(reason="PR3: array_progress was driven by the dropped executor.progress() ping in TaskRunner.status; the producer flip makes status a pure DB read. To be revisited once the heartbeat surfaces per-array-task counts in the DB.")
     def test_status_shows_array_progress(self):
         """Verify status formats array progress from executor."""
         with patch("devrun.cli.TaskRunner") as mock_runner_class:

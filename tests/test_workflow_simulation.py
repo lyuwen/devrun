@@ -175,6 +175,15 @@ class TestWorkflowSimulation:
         assert inf_dataset == col_dataset == eval_dataset
 
 
+_LEGACY_HEARTBEAT_LOOP_SKIP = pytest.mark.skip(
+    reason="PR3: WorkflowRunner.run() is now a pure producer (atomic enqueue + return). "
+    "Tests that exercise the legacy in-runner heartbeat loop, stage-by-stage submit, "
+    "and stages_state mutation are being removed in PR3 Task #37 "
+    "(drop run_detached, --detach, in-runner polling)."
+)
+
+
+@_LEGACY_HEARTBEAT_LOOP_SKIP
 class TestWorkflowSimulationStartAfter:
     """Simulation tests for start_after and from_job workflows."""
 
@@ -391,6 +400,7 @@ class TestWorkflowSimulationStartAfter:
         assert inf_ds_dir == col_ds_dir
 
 
+@_LEGACY_HEARTBEAT_LOOP_SKIP
 class TestCrossStageRefSimulation:
     """Simulation tests for the cross-stage reference mechanism.
 

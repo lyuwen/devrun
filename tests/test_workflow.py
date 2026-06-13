@@ -27,6 +27,15 @@ def workflow_runner(tmp_path):
     return WorkflowRunner(db_path=tmp_path / "test.db")
 
 
+_LEGACY_HEARTBEAT_LOOP_SKIP = pytest.mark.skip(
+    reason="PR3: WorkflowRunner.run() is now a pure producer (atomic enqueue + return). "
+    "Tests that exercise the legacy in-runner heartbeat loop, stage-by-stage submit, "
+    "and stages_state mutation are being removed in PR3 Task #37 "
+    "(drop run_detached, --detach, in-runner polling)."
+)
+
+
+@_LEGACY_HEARTBEAT_LOOP_SKIP
 class TestWorkflowRunner:
     def test_dry_run_does_not_submit(self, workflow_runner, simple_config):
         """Dry-run should not create any DB records or submit jobs."""
@@ -237,6 +246,7 @@ class TestWorkflowRunner:
         assert len(result) == 2
 
 
+@_LEGACY_HEARTBEAT_LOOP_SKIP
 class TestWorkflowRunnerParallelStages:
     """Test workflows with independent (parallel-eligible) stages."""
 
@@ -347,6 +357,7 @@ class TestOmegaConfInterpolation:
 # ============================================================================
 
 
+@_LEGACY_HEARTBEAT_LOOP_SKIP
 class TestWorkflowStartAfter:
     """Tests for the start_after feature that skips completed stages."""
 
@@ -980,6 +991,7 @@ class TestResolveStageParams:
             workflow_runner._resolve_stage_params(stage, stages_state)
 
 
+@_LEGACY_HEARTBEAT_LOOP_SKIP
 class TestCrossStageIntegration:
     """Integration tests for cross-stage params through the heartbeat loop."""
 

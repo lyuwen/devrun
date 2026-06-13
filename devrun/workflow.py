@@ -10,11 +10,14 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from devrun.db.jobs import JobStore
+import yaml
+
+from devrun.db.jobs import JobStore, WorkflowStageRow
 from devrun.models import JobStatus, WorkflowConfig, WorkflowStage
 from devrun.registry import get_task_class
 from devrun.router import resolve_executor
@@ -48,11 +51,17 @@ class WorkflowRunner:
         start_after: str | None = None,
         skipped_params: dict[str, dict[str, Any]] | None = None,
     ) -> str:
-        """Execute (or dry-run) a workflow.
+        """Enqueue a workflow's stages atomically and return the workflow_id.
+
+        PR3 producer-flip: this method **no longer drives a polling loop**.
+        It writes the workflow row, one jobs row per non-skipped stage, one
+        workflow_jobs row per stage, and all dependency edges in a single
+        ``JobStore.enqueue_workflow`` transaction, then exits. The heartbeat
+        scheduler is responsible for promoting QUEUED jobs to SUBMITTED.
 
         Args:
             config: Parsed workflow configuration.
-            dry_run: Preview execution plan without submitting.
+            dry_run: Preview execution plan without enqueueing.
             start_after: Skip this stage and its transitive dependencies.
             skipped_params: Pre-resolved params for stages skipped via
                 ``--from-job``.  Keys are stage names, values are the
@@ -62,7 +71,6 @@ class WorkflowRunner:
         """
         stages_by_name = {s.name: s for s in config.stages}
 
-        # Validate start_after early (applies to both dry-run and real runs)
         skip_set: set[str] = set()
         if start_after:
             skip_set = self._compute_skip_set(start_after, stages_by_name)
@@ -73,32 +81,89 @@ class WorkflowRunner:
                 skipped_params=skipped_params,
             )
 
-        # Fail fast on unfilled <REQUIRED:…> placeholders
         self._validate_no_placeholders(config)
 
-        # Initialise per-stage state
-        stages_state: dict[str, dict[str, Any]] = {}
+        deadline_at = datetime.now(timezone.utc) + timedelta(seconds=config.timeout)
+        stage_rows, edges = self._build_stage_plan(
+            config, stages_by_name, skip_set=skip_set,
+        )
+
+        wf_id = self._db.enqueue_workflow(
+            workflow_name=config.workflow,
+            deadline_at=deadline_at,
+            stage_rows=stage_rows,
+            edges=edges,
+        )
+        logger.info(
+            "Workflow %s enqueued: %s (stages=%d, edges=%d)",
+            wf_id, config.workflow, len(stage_rows), len(edges),
+        )
+        return wf_id
+
+    def _build_stage_plan(
+        self,
+        config: WorkflowConfig,
+        stages_by_name: dict[str, WorkflowStage],
+        *,
+        skip_set: set[str],
+    ) -> tuple[list[WorkflowStageRow], list[tuple[str, str, bool]]]:
+        """Build the (stage_rows, edges) tuple handed to ``enqueue_workflow``.
+
+        Each non-skipped stage gets a fresh ``job_id`` (uuid hex prefix);
+        each ``depends_on`` reference becomes one edge (child=this stage's
+        job_id, parent=referenced stage's job_id). Skipped stages get
+        ``job_id=None`` and currently leave ``source_job_id=None``; PR3
+        Task 5 will populate ``source_job_id`` when ``--from-job`` is used.
+        """
+        stage_rows: list[WorkflowStageRow] = []
+        job_ids: dict[str, str | None] = {}
+        for ordinal, stage in enumerate(config.stages):
+            if stage.name in skip_set:
+                job_ids[stage.name] = None
+                stage_rows.append(
+                    WorkflowStageRow(
+                        stage_name=stage.name,
+                        ordinal=ordinal,
+                        job_id=None,
+                        source_job_id=None,
+                        task_name=None,
+                        executor=None,
+                        params_template=None,
+                        parameters=None,
+                    )
+                )
+                continue
+            job_id = uuid.uuid4().hex[:12]
+            job_ids[stage.name] = job_id
+            stage_rows.append(
+                WorkflowStageRow(
+                    stage_name=stage.name,
+                    ordinal=ordinal,
+                    job_id=job_id,
+                    source_job_id=None,
+                    task_name=stage.task,
+                    executor=stage.executor,
+                    params_template=yaml.safe_dump(stage.params or {}, sort_keys=False),
+                    parameters=dict(stage.params or {}),
+                )
+            )
+
+        edges: list[tuple[str, str, bool]] = []
         for stage in config.stages:
-            stages_state[stage.name] = {"status": "pending", "remote_job_id": None, "db_job_id": None}
-
-        # Pre-mark skipped stages and populate their resolved_params
-        if skip_set:
-            for name in skip_set:
-                state: dict[str, Any] = {
-                    "status": "skipped_by_user",
-                    "remote_job_id": None,
-                    "db_job_id": None,
-                }
-                if skipped_params and name in skipped_params:
-                    state["resolved_params"] = skipped_params[name]
-                stages_state[name] = state
-                logger.info("Stage %s skipped (--start-after %s)", name, start_after)
-
-        wf_id = self._db.insert_workflow(config.workflow, stages_state)
-        self._db.update_workflow(wf_id, status="running")
-        logger.info("Workflow %s started: %s", wf_id, config.workflow)
-
-        return self._heartbeat_loop(wf_id, config, stages_state)
+            child_id = job_ids.get(stage.name)
+            if child_id is None:
+                continue
+            parents = stage.depends_on
+            if parents is None:
+                continue
+            if isinstance(parents, str):
+                parents = [parents]
+            for parent_name in parents:
+                parent_id = job_ids.get(parent_name)
+                if parent_id is None:
+                    continue
+                edges.append((child_id, parent_id, False))
+        return stage_rows, edges
 
     def run_detached(
         self,
