@@ -50,6 +50,7 @@ class WorkflowRunner:
         dry_run: bool = False,
         start_after: str | None = None,
         skipped_params: dict[str, dict[str, Any]] | None = None,
+        from_job: str | None = None,
     ) -> str:
         """Enqueue a workflow's stages atomically and return the workflow_id.
 
@@ -66,10 +67,18 @@ class WorkflowRunner:
             skipped_params: Pre-resolved params for stages skipped via
                 ``--from-job``.  Keys are stage names, values are the
                 param dicts from the corresponding job records.
+            from_job: Job ID from ``--from-job``, used to populate
+                ``source_job_id`` in workflow_jobs rows for skipped stages.
 
         Returns the workflow_id for real runs, or a plan string for dry_run.
         """
         stages_by_name = {s.name: s for s in config.stages}
+
+        # Validate start_after requires from_job (defense-in-depth)
+        if start_after and not from_job:
+            raise ValueError(
+                "--start-after requires --from-job to provide params for skipped stages"
+            )
 
         skip_set: set[str] = set()
         if start_after:
@@ -85,7 +94,7 @@ class WorkflowRunner:
 
         deadline_at = datetime.now(timezone.utc) + timedelta(seconds=config.timeout)
         stage_rows, edges = self._build_stage_plan(
-            config, stages_by_name, skip_set=skip_set,
+            config, stages_by_name, skip_set=skip_set, source_job_id=from_job,
         )
 
         wf_id = self._db.enqueue_workflow(
@@ -106,14 +115,14 @@ class WorkflowRunner:
         stages_by_name: dict[str, WorkflowStage],
         *,
         skip_set: set[str],
+        source_job_id: str | None = None,
     ) -> tuple[list[WorkflowStageRow], list[tuple[str, str, bool]]]:
         """Build the (stage_rows, edges) tuple handed to ``enqueue_workflow``.
 
         Each non-skipped stage gets a fresh ``job_id`` (uuid hex prefix);
         each ``depends_on`` reference becomes one edge (child=this stage's
         job_id, parent=referenced stage's job_id). Skipped stages get
-        ``job_id=None`` and currently leave ``source_job_id=None``; PR3
-        Task 5 will populate ``source_job_id`` when ``--from-job`` is used.
+        ``job_id=None`` and ``source_job_id`` from the ``--from-job`` parameter.
         """
         stage_rows: list[WorkflowStageRow] = []
         job_ids: dict[str, str | None] = {}
@@ -125,7 +134,7 @@ class WorkflowRunner:
                         stage_name=stage.name,
                         ordinal=ordinal,
                         job_id=None,
-                        source_job_id=None,
+                        source_job_id=source_job_id,
                         task_name=None,
                         executor=None,
                         params_template=None,
@@ -135,6 +144,12 @@ class WorkflowRunner:
                 continue
             job_id = uuid.uuid4().hex[:12]
             job_ids[stage.name] = job_id
+            raw_template = yaml.safe_dump(stage.params or {}, sort_keys=False)
+            if source_job_id is not None:
+                source_stage_map = self._build_source_stage_map(source_job_id)
+                params_template = self._rewrite_stage_references(raw_template, source_stage_map)
+            else:
+                params_template = raw_template
             stage_rows.append(
                 WorkflowStageRow(
                     stage_name=stage.name,
@@ -143,7 +158,7 @@ class WorkflowRunner:
                     source_job_id=None,
                     task_name=stage.task,
                     executor=stage.executor,
-                    params_template=yaml.safe_dump(stage.params or {}, sort_keys=False),
+                    params_template=params_template,
                     parameters=dict(stage.params or {}),
                 )
             )
@@ -160,10 +175,60 @@ class WorkflowRunner:
                 parents = [parents]
             for parent_name in parents:
                 parent_id = job_ids.get(parent_name)
+                # If parent is skipped (job_id=None), use source_job_id instead
+                if parent_id is None and parent_name in skip_set and source_job_id is not None:
+                    parent_id = source_job_id
                 if parent_id is None:
                     continue
                 edges.append((child_id, parent_id, False))
         return stage_rows, edges
+
+    def _rewrite_stage_references(
+        self, params_template: str, stage_map: dict[str, str]
+    ) -> str:
+        """Rewrite ${stages:stage_name,field} → ${jobs:job_id,field}.
+
+        stage_map: {stage_name: job_id} for all stages in the source workflow.
+        If stage_map contains {"*": job_id}, all stage refs map to that single job.
+        """
+        pattern = r'\$\{stages:([^,}]+),([^}]+)\}'
+
+        def replace(match):
+            stage_name = match.group(1)
+            field = match.group(2)
+            # Check for exact match first, then wildcard
+            if stage_name in stage_map:
+                job_id = stage_map[stage_name]
+                return f"${{jobs:{job_id},{field}}}"
+            elif "*" in stage_map:
+                job_id = stage_map["*"]
+                return f"${{jobs:{job_id},{field}}}"
+            return match.group(0)  # unchanged if stage not found
+
+        return re.sub(pattern, replace, params_template)
+
+    def _build_source_stage_map(self, source_job_id: str) -> dict[str, str]:
+        """Build a map of {stage_name: job_id} from the source job's workflow.
+
+        This is used to rewrite ${stages:...} references when using --from-job.
+        If the source job is standalone (not part of a workflow), all stage
+        references map to the source job itself.
+        """
+        # Check if source job is part of a workflow
+        workflow_jobs = self._db._conn.execute(
+            "SELECT workflow_id FROM workflow_jobs WHERE job_id = ?",
+            (source_job_id,)
+        ).fetchone()
+
+        if workflow_jobs is None:
+            # Source job is standalone - map all stage refs to this job
+            # This allows ${stages:any_name,...} → ${jobs:<source_job_id>,...}
+            return {"*": source_job_id}
+
+        # Source job is part of a workflow - get the full stage map
+        workflow_id = workflow_jobs["workflow_id"]
+        source_stages = self._db.get_workflow_stages(workflow_id)
+        return {s.stage_name: s.job_id for s in source_stages if s.job_id is not None}
 
     def run_detached(
         self,
@@ -504,23 +569,30 @@ class WorkflowRunner:
     def _compute_skip_set(
         start_after: str, stages_by_name: dict[str, WorkflowStage]
     ) -> set[str]:
-        """Return the set of stage names to skip: *start_after* plus its transitive deps."""
+        """Return the set of stage names to skip: all stages that come before start_after.
+
+        The named stage and everything after it will run.
+        """
         if start_after not in stages_by_name:
             raise ValueError(
                 f"--start-after stage '{start_after}' does not exist. "
                 f"Available stages: {sorted(stages_by_name)}"
             )
         skip: set[str] = set()
+        # Walk backward from start_after through its dependencies
         queue = [start_after]
+        visited = set()
         while queue:
             name = queue.pop()
-            if name in skip:
+            if name in visited:
                 continue
-            skip.add(name)
+            visited.add(name)
             deps = stages_by_name[name].depends_on or []
             if isinstance(deps, str):
                 deps = [deps]
-            queue.extend(deps)
+            for dep in deps:
+                skip.add(dep)  # Skip the dependency, not the stage itself
+                queue.append(dep)
         return skip
 
     @staticmethod

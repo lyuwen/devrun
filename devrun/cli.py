@@ -648,7 +648,6 @@ def workflow_run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
     start_after: Optional[str] = typer.Option(None, "--start-after", help="Skip this stage and its dependencies, start from the next"),
     from_job: Optional[str] = typer.Option(None, "--from-job", help="Extract workflow params from an existing job"),
-    detach: bool = typer.Option(False, "--detach", "-d", help="Run workflow in background, return immediately"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
@@ -672,6 +671,13 @@ def workflow_run(
         raise typer.Exit(code=2)
 
     _setup_logging(verbose)
+
+    # Validate --start-after requires --from-job
+    if start_after and not from_job:
+        console.print(
+            "[red]Error:[/red] --start-after requires --from-job to provide params for skipped stages."
+        )
+        raise typer.Exit(code=1)
 
     from omegaconf import OmegaConf
     from devrun.runner import find_configs
@@ -778,31 +784,18 @@ def workflow_run(
                     skipped_params[source_stage] = record.params_dict
 
     try:
-        if detach:
-            if dry_run:
-                console.print("[red]Error:[/red] --detach and --dry-run cannot be used together.")
-                raise typer.Exit(code=1)
-            wf_id = runner.run_detached(
-                cfg,
-                start_after=start_after,
-                skipped_params=skipped_params or None,
-            )
-            console.print(
-                f"[green]Workflow {wf_id} started in background.[/green]\n"
-                f"Use [bold]devrun workflow status {wf_id}[/bold] to monitor."
-            )
+        result = runner.run(
+            cfg,
+            dry_run=dry_run,
+            start_after=start_after,
+            skipped_params=skipped_params or None,
+            from_job=from_job,
+        )
+        if dry_run:
+            console.print(result)
+            console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
         else:
-            result = runner.run(
-                cfg,
-                dry_run=dry_run,
-                start_after=start_after,
-                skipped_params=skipped_params or None,
-            )
-            if dry_run:
-                console.print(result)
-                console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
-            else:
-                console.print(f"[green]Workflow completed:[/green] {result}")
+            console.print(f"[green]Workflow enqueued:[/green] {result}")
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)
