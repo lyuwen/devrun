@@ -469,7 +469,7 @@ class JobStore:
         """Transition SUBMITTING -> SUBMITTED and persist resolved fields + clear claim."""
         self._conn.execute(
             "UPDATE jobs SET status = ?, remote_job_id = ?, log_path = ?, parameters = ?, "
-            "claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL "
+            "claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL, skip_reason = NULL "
             "WHERE job_id = ? AND status = ?",
             (
                 JobStatus.SUBMITTED.value,
@@ -676,7 +676,8 @@ class JobStore:
         current = row["status"]
         if current in self._TERMINAL_JOB_STATUSES:
             raise ValueError(f"Job {job_id} is already {current}; cannot cancel")
-        if current == JobStatus.QUEUED.value:
+        # QUEUED and legacy PENDING can transition directly to CANCELLED
+        if current in (JobStatus.QUEUED.value, "pending"):
             new_status = JobStatus.CANCELLED
             now = datetime.now(timezone.utc).isoformat()
             self._conn.execute(
@@ -684,6 +685,7 @@ class JobStore:
                 (new_status.value, now, job_id),
             )
         else:
+            # SUBMITTED, RUNNING, SUBMITTING -> CANCELING (heartbeat will finish)
             new_status = JobStatus.CANCELING
             self._conn.execute(
                 "UPDATE jobs SET status = ? WHERE job_id = ?",
