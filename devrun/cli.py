@@ -204,6 +204,7 @@ def run(
             )
         except ValueError as exc:
             console.print(f"[red]Error:[/red] {exc}")
+            console.print("[dim]Hint: Use 'devrun history' to find a valid job id, or try -1 for most recent[/dim]")
             raise typer.Exit(code=1)
         console.print(
             f"[dim]From job {resolved_job_id} ({source_task}): {list(imported.keys())}[/dim]"
@@ -742,6 +743,7 @@ def workflow_run(
                 )
             except ValueError as exc:
                 console.print(f"[red]Error:[/red] {exc}")
+                console.print("[dim]Hint: Use 'devrun history' to find a valid job id, or try -1 for most recent[/dim]")
                 raise typer.Exit(code=1)
             from_job = resolved_job_id  # propagate resolved ID downstream
             if job_params:

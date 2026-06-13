@@ -72,7 +72,8 @@ class WorkflowRunner:
         # Validate start_after requires from_job (defense-in-depth)
         if start_after and not from_job:
             raise ValueError(
-                "--start-after requires --from-job to provide params for skipped stages"
+                "--start-after requires --from-job because skipped stages need source "
+                "job params to resolve downstream cross-stage references (${stages:...})"
             )
 
         skip_set: set[str] = set()
