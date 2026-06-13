@@ -52,13 +52,14 @@ def run() -> None:
 
 @heartbeat_app.command()
 def install() -> None:
-    """Install the heartbeat as a managed service (systemd --user / launchd) and start it."""
+    """Install the heartbeat as a managed service (systemd --user / launchd).
+
+    Does NOT start the service; run ``devrun heartbeat start`` to activate.
+    """
     from devrun.services import get_service
 
-    svc = get_service()
-    svc.install(python_path=sys.executable, db_path=str(default_db_path()))
-    svc.start()
-    typer.echo("Installed and started heartbeat service.")
+    get_service().install(python_path=sys.executable, db_path=str(default_db_path()))
+    typer.echo("Installed. Run 'devrun heartbeat start' to activate.")
 
 
 @heartbeat_app.command()

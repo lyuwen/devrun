@@ -7,7 +7,8 @@ Heartbeat scheduler control — manage the background service or run the schedul
 ```bash
 devrun heartbeat                    # Run foreground loop (refuses if service active)
 devrun heartbeat run                # Run foreground without service guard
-devrun heartbeat install            # Install and start service
+devrun heartbeat install            # Install service (does not start)
+devrun heartbeat start              # Activate the installed service
 devrun heartbeat start              # Start service
 devrun heartbeat stop               # Stop service
 devrun heartbeat restart            # Restart service
@@ -82,28 +83,31 @@ devrun heartbeat run
 
 ### `devrun heartbeat install`
 
-Install the heartbeat as a managed service and start it immediately.
+Install the heartbeat as a managed service. **Does NOT start it**; run `devrun heartbeat start` to activate.
 
 **Behavior:**
 - Detects the host platform (Linux → systemd, macOS → launchd)
 - Generates a service unit file with the current Python interpreter path and default DB location
 - Registers the service with the OS service manager
 - Enables auto-start on boot/login
-- Starts the service
+- Leaves the service stopped — run `devrun heartbeat start` to activate
 
 **Service file locations:**
 - **Linux:** `~/.config/systemd/user/devrun-heartbeat.service`
 - **macOS:** `~/Library/LaunchAgents/com.devrun.heartbeat.plist`
 
 **Exit codes:**
-- `0` — Service installed and started successfully
+- `0` — Service installed successfully (not started)
 - Non-zero — Installation failed (systemctl/launchctl error)
 
 **Example:**
 
 ```bash
-# Install and start the service
+# Install the service (does not start)
 devrun heartbeat install
+
+# Start the service
+devrun heartbeat start
 
 # Verify it's running
 devrun heartbeat status

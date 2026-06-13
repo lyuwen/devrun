@@ -25,18 +25,21 @@ Both backends support auto-start on login and graceful shutdown via `SIGTERM`.
 
 ## Installation
 
-Install and start the service in one command:
+Install the service, then start it:
 
 ```bash
 devrun heartbeat install
+devrun heartbeat start
 ```
 
-This command:
+`install` does not start the service automatically — that's the explicit second step. This lets you inspect the generated unit/plist (or move the database first) before activating.
+
+The `install` step:
 - Detects your platform (Linux or macOS)
 - Generates a service configuration file with your current Python interpreter and default database path
 - Registers the service with the OS service manager
 - Enables auto-start on boot/login
-- Starts the service immediately
+- Leaves the service stopped — run `devrun heartbeat start` to activate
 
 **Service file locations:**
 
@@ -119,7 +122,7 @@ log show --predicate 'processImagePath contains "python"' --info --last 10m | gr
 
 ### Service fails to start
 
-**Symptom:** `devrun heartbeat status` shows `inactive` immediately after `install`.
+**Symptom:** `devrun heartbeat status` shows `inactive` immediately after `start` (or after `install`, but note that `install` no longer starts the service automatically — run `devrun heartbeat start` first).
 
 **Common causes:**
 
