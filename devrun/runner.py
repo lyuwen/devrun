@@ -232,38 +232,16 @@ class TaskRunner:
         return job_ids
 
     def status(self, job_id: str) -> dict[str, Any]:
-        """Return live status for a job, refreshing from the executor if needed."""
+        """Return the job's DB record as a JSON-serialisable dict.
+
+        PR3: this is a pure DB read. The heartbeat is the only writer of
+        ``status``; clients reading via ``devrun status`` see whatever the
+        last completed tick wrote, never a live executor ping.
+        """
         record = self._db.get(job_id)
         if not record:
             return {"error": f"Job {job_id} not found"}
-
-        # If still active (or unknown), query executor for live status
-        if record.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING, JobStatus.UNKNOWN):
-            try:
-                executor = resolve_executor(record.executor, self.executor_configs)
-                remote_id = record.remote_job_id or job_id
-                live_status = executor.status(remote_id)
-                mapped = self._map_status(live_status)
-                if mapped != record.status:
-                    completed_at = datetime.now(timezone.utc) if mapped in (JobStatus.COMPLETED, JobStatus.FAILED) else None
-                    self._db.update_status(job_id, mapped, completed_at=completed_at)
-                    record = self._db.get(job_id)
-            except Exception as exc:
-                logger.warning("Could not refresh status for %s: %s", job_id, exc)
-
-        result = record.model_dump(mode="json") if record else {}
-
-        # Fetch live progress info (e.g. array task counts) — best-effort
-        try:
-            executor = resolve_executor(record.executor, self.executor_configs)
-            remote_id = record.remote_job_id or job_id
-            progress = executor.progress(remote_id)
-            if progress:
-                result["progress"] = progress
-        except Exception as exc:
-            logger.warning("Could not fetch progress for %s: %s", job_id, exc)
-
-        return result
+        return record.model_dump(mode="json")
 
     def logs(self, job_id: str) -> str:
         """Retrieve logs for a job."""
@@ -279,15 +257,9 @@ class TaskRunner:
             return f"Error fetching logs: {exc}"
 
     def history(self, limit: int | None = 50) -> list[dict[str, Any]]:
-        """Return recent job records, refreshing active ones first."""
+        """Return recent job records as JSON-serialisable dicts (pure DB read)."""
         records = self._db.list_all(limit)
-        results = []
-        for r in records:
-            if r.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING, JobStatus.UNKNOWN):
-                results.append(self.status(r.job_id))
-            else:
-                results.append(r.model_dump(mode="json"))
-        return results
+        return [r.model_dump(mode="json") for r in records]
 
     def rerun(self, job_id: str) -> list[str]:
         """Re-submit a previous job with the same parameters."""
@@ -359,29 +331,15 @@ class TaskRunner:
         return imported, record.task_name, record.job_id
 
     def cancel(self, job_id: str) -> None:
-        """Cancel a running job."""
-        record = self._db.get(job_id)
-        if not record:
-            raise ValueError(f"Job {job_id} not found")
+        """Producer-side cancel: write the state transition; the heartbeat reaps.
 
-        # Forcefully update the job status from the executor before deciding
-        self.status(job_id)
-        record = self._db.get(job_id)
-
-        # Do not cancel if it's already in a terminal state
-        if record.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-            logger.info("Job %s is already %s, skipping cancellation.", job_id, record.status)
-            raise ValueError(f"Job {job_id} is already {record.status}.")
-
-        try:
-            executor = resolve_executor(record.executor, self.executor_configs)
-            remote_id = record.remote_job_id or job_id
-            executor.cancel(remote_id)
-            self._db.update_status(job_id, JobStatus.CANCELLED, completed_at=datetime.now(timezone.utc))
-            logger.info("Job %s cancelled successfully.", job_id)
-        except Exception as exc:
-            logger.error("Failed to cancel job %s: %s", job_id, exc)
-            raise
+        Delegates to :meth:`JobStore.request_cancel` which handles QUEUED
+        (immediate CANCELLED) vs SUBMITTED/RUNNING (CANCELING — the heartbeat's
+        poll phase calls ``executor.cancel`` and finalises on success).
+        Terminal states raise ``ValueError``.
+        """
+        new_status = self._db.request_cancel(job_id)
+        logger.info("Cancel requested for job %s: now %s", job_id, new_status.value)
 
     # ---- internal --------------------------------------------------------
 

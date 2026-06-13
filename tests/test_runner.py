@@ -288,11 +288,11 @@ class TestRunnerStatus:
             result = runner.status(job_id)
             assert result["status"] == "completed"
 
-    def test_status_includes_progress_from_executor(self, executors_yaml, temp_dir):
-        """Verify runner.status() merges executor.progress() into the result dict."""
+    def test_status_is_pure_db_read(self, executors_yaml, temp_dir):
+        """PR3: runner.status() returns DB state only — no executor.status() or .progress() calls."""
         from devrun.db.jobs import JobStore
 
-        db_path = temp_dir / "test_progress.db"
+        db_path = temp_dir / "test_pure_db.db"
         store = JobStore(db_path)
         job_id = store.insert("eval", "local", {"model": "test"})
         store.update_status(job_id, JobStatus.RUNNING, remote_job_id="slurm_123")
@@ -314,9 +314,16 @@ class TestRunnerStatus:
             runner = TaskRunner(executors_path=str(executors_yaml), db_path=db_path)
             result = runner.status(job_id)
 
-        assert "progress" in result
-        assert result["progress"]["total_tasks"] == 65
-        assert result["progress"]["task_counts"]["completed"] == 50
+        # Status returns the DB row's status; no merged executor.progress() output.
+        assert mock_executor.status.call_count == 0
+        assert mock_executor.progress.call_count == 0
+        # Result must reflect what the heartbeat last wrote to the DB.
+        # Accept either a dict (legacy shape) or JobRecord (plan-suggested shape).
+        if isinstance(result, dict):
+            assert result["status"] == "running"
+            assert "progress" not in result
+        else:
+            assert result.status == "running" or result.status == JobStatus.RUNNING
 
 
 class TestRunnerLogs:
@@ -331,15 +338,16 @@ class TestRunnerLogs:
 
 
 class TestRunnerCancel:
-    """Tests for TaskRunner.cancel method."""
+    """Tests for cancel — PR3 moved cancel into JobStore.request_cancel; TaskRunner.cancel may be removed."""
 
-    def test_cancel_not_found(self, executors_yaml, temp_dir):
-        """Verify cancel raises error for unknown job."""
-        with patch("devrun.executors.local._LOG_DIR", temp_dir / "logs"):
-            runner = TaskRunner(executors_path=str(executors_yaml), db_path=":memory:")
-            with pytest.raises(ValueError) as exc_info:
-                runner.cancel("nonexistent_job")
-            assert "not found" in str(exc_info.value)
+    def test_cancel_unknown_job_raises(self, executors_yaml, temp_dir):
+        """JobStore.request_cancel raises ValueError for unknown job ids."""
+        from devrun.db.jobs import JobStore
+
+        db = JobStore(temp_dir / "cancel.db")
+        with pytest.raises(ValueError) as exc_info:
+            db.request_cancel("nonexistent_job")
+        assert "not found" in str(exc_info.value)
 
     @pytest.mark.skip(reason="Flaky test - requires remote machine")
     def test_cancel_already_completed(self, executors_yaml, temp_dir, mock_job_store):
