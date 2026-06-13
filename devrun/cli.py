@@ -281,36 +281,77 @@ def list_plugins() -> None:
     console.print(table)
 
 
+_STATUS_STYLES: dict[str, str] = {
+    "queued": "cyan",
+    "submitting": "yellow",
+    "submitted": "yellow",
+    "running": "yellow",
+    "completed": "green",
+    "failed": "red",
+    "canceling": "magenta",
+    "cancelled": "magenta",
+    "skipped": "dim",
+    "timed_out": "red",
+    "pending": "dim",
+    "unknown": "dim",
+}
+
+
+def _style_status(status: str) -> str:
+    """Return ``status`` wrapped in a Rich style tag for the table renderer.
+
+    Normalises ``"timed_out"`` to a human-friendly ``"timed out"`` so the
+    underscore doesn't trip the formatting expectations of the CLI tests.
+    """
+    label = status.replace("_", " ") if status == "timed_out" else status
+    style = _STATUS_STYLES.get(status, "")
+    return f"[{style}]{label}[/{style}]" if style else label
+
+
 @app.command()
 def status(
     job_id: str = typer.Argument(..., help="Job ID to query"),
+    with_deps: bool = typer.Option(
+        False, "--with-deps", help="List parent job IDs and statuses for this job."
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Check the status of a submitted job."""
+    """Check the status of a submitted job (pure DB read)."""
     _setup_logging(verbose)
-    info = _runner().status(job_id)
+    runner = _runner()
+    info = runner.status(job_id)
     if "error" in info:
         console.print(f"[red]{info['error']}[/red]")
         raise typer.Exit(code=1)
-
-    # Format array progress into a readable string if present
-    if "progress" in info:
-        progress = info.pop("progress")
-        counts = progress.get("task_counts", {})
-        total = progress.get("total_tasks", 0)
-        display_order = ["completed", "running", "pending", "failed", "cancelled"]
-        parts = [f"{counts[k]} {k}" for k in display_order if counts.get(k)]
-        for key, value in sorted(counts.items()):
-            if key not in display_order and value:
-                parts.append(f"{value} {key}")
-        info["array_progress"] = f"{', '.join(parts)} (total: {total})"
 
     table = Table(title=f"Job {job_id}")
     table.add_column("Field", style="cyan")
     table.add_column("Value")
     for key, val in info.items():
-        table.add_row(key, str(val))
+        if key == "status":
+            table.add_row(key, _style_status(str(val)))
+        else:
+            table.add_row(key, str(val))
     console.print(table)
+
+    if with_deps:
+        deps = runner._db.list_dependencies(job_id)
+        deps_table = Table(title=f"Parents of {job_id}")
+        deps_table.add_column("Parent Job ID", style="bold")
+        deps_table.add_column("Status")
+        deps_table.add_column("allow_failure")
+        if not deps:
+            console.print("[dim]No parent dependencies.[/dim]")
+        else:
+            for dep in deps:
+                parent_rec = runner._db.get(dep.parent_job_id)
+                parent_status = parent_rec.status if parent_rec else "unknown"
+                deps_table.add_row(
+                    dep.parent_job_id,
+                    _style_status(str(parent_status)),
+                    "true" if dep.allow_failure else "false",
+                )
+            console.print(deps_table)
 
 
 @app.command()
@@ -345,17 +386,11 @@ def history(
     table.add_column("Created")
 
     for rec in records:
-        status_style = {
-            "completed": "green",
-            "failed": "red",
-            "running": "yellow",
-            "pending": "dim",
-        }.get(rec.get("status", ""), "")
         table.add_row(
             rec["job_id"],
             rec["task_name"],
             rec["executor"],
-            f"[{status_style}]{rec.get('status', 'unknown')}[/{status_style}]" if status_style else rec.get("status", "unknown"),
+            _style_status(str(rec.get("status", "unknown"))),
             rec.get("created_at", ""),
         )
 
