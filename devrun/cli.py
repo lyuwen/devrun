@@ -145,6 +145,14 @@ def run(
         None, "--from-job",
         help="Import params from an existing job (e.g. swe_bench_collect --from-job <agentic_job_id>)",
     ),
+    after: list[str] = typer.Option(
+        [], "--after",
+        help="Wait for these job IDs to complete before submitting. Repeatable.",
+    ),
+    allow_failure_from: list[str] = typer.Option(
+        [], "--allow-failure-from",
+        help="Subset of --after jobs whose failure should not block this run. Repeatable.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
@@ -201,12 +209,21 @@ def run(
         overrides.extend(ctx.args)
 
     try:
-        job_ids = runner.run(target, overrides=overrides, dry_run=dry_run)
+        job_ids = runner.run(
+            target,
+            overrides=overrides,
+            dry_run=dry_run,
+            after=after,
+            allow_failure_from=set(allow_failure_from),
+        )
         if dry_run:
             console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
         else:
             for jid in job_ids:
-                console.print(f"[green]✓[/green] Job submitted: [bold]{jid}[/bold]")
+                console.print(f"[green]✓[/green] Job queued: [bold]{jid}[/bold]")
+    except ValueError as exc:
+        console.print(f"[red]✗ Error:[/red] {exc}")
+        raise typer.Exit(code=1)
     except Exception as exc:
         console.print(f"[red]✗ Error:[/red] {exc}")
         raise typer.Exit(code=1)

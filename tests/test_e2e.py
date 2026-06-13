@@ -61,12 +61,13 @@ class TestE2EJobSubmission:
                 job_ids = runner.run(str(config_path))
                 assert len(job_ids) == 1
 
-                # Verify job is in database
+                # Verify job is in database (PR3: producer enqueues to QUEUED;
+                # heartbeat is responsible for promotion to SUBMITTED).
                 record = runner._db.get(job_ids[0])
                 assert record is not None
                 assert record.task_name == "eval"
                 assert record.executor == "local"
-                assert record.status == JobStatus.RUNNING
+                assert record.status == JobStatus.QUEUED
 
     def test_multiple_job_submission(self, temp_dir, executors_yaml):
         """Test submitting multiple jobs."""

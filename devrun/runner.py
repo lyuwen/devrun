@@ -120,6 +120,26 @@ def load_merged_config(
     return OmegaConf.to_container(merged_cfg, resolve=True)
 
 
+def _warn_if_no_heartbeat() -> None:
+    """Log a one-line warning when the heartbeat service is not active.
+
+    The producer path enqueues jobs in ``QUEUED`` state; without a running
+    heartbeat they will sit there indefinitely. Best-effort only — never
+    raises (a missing service module or unsupported platform must not block
+    job enqueue).
+    """
+    try:
+        from devrun.services import get_service
+
+        if not get_service().is_active():
+            logger.warning(
+                "Heartbeat service is not active. Jobs queued but will not "
+                "promote until 'devrun heartbeat start' runs."
+            )
+    except Exception:
+        logger.debug("Heartbeat status check skipped", exc_info=True)
+
+
 class TaskRunner:
     """Loads task configs, expands sweeps, prepares tasks, and dispatches to executors."""
 
@@ -147,8 +167,34 @@ class TaskRunner:
         """
         return find_configs(target, self._config_dirs)
 
-    def run(self, target: str, overrides: list[str] | None = None, dry_run: bool = False) -> list[str]:
-        """Parse a task YAML, apply overrides, expand sweeps, submit all jobs. Returns list of job_ids."""
+    def run(
+        self,
+        target: str,
+        overrides: list[str] | None = None,
+        dry_run: bool = False,
+        *,
+        after: list[str] | None = None,
+        allow_failure_from: set[str] | None = None,
+    ) -> list[str]:
+        """Parse a task YAML, apply overrides, expand sweeps, enqueue all jobs. Returns list of job_ids.
+
+        ``after`` is a list of parent job IDs the new job depends on; the
+        heartbeat will not promote it until each parent reaches a terminal
+        state. ``allow_failure_from`` is the subset of ``after`` whose failure
+        should be tolerated (mapped to ``allow_failure=1`` on the edge).
+        """
+        after = list(after or [])
+        allow_failure_from = set(allow_failure_from or set())
+        if after:
+            for parent_id in after:
+                if self._db.get(parent_id) is None:
+                    raise ValueError(f"--after references unknown job id: {parent_id}")
+            unknown_lenient = allow_failure_from - set(after)
+            if unknown_lenient:
+                raise ValueError(
+                    "--allow-failure-from ids must also appear in --after: "
+                    f"{sorted(unknown_lenient)}"
+                )
         cfg = self._load_config(target, overrides)
         param_combos = self._expand_sweep(cfg)
         job_ids: list[str] = []
@@ -174,7 +220,14 @@ class TaskRunner:
                     lines.append(spec.command)
                     print("\n".join(lines))
             else:
-                job_ids.extend(self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env))
+                job_ids.extend(
+                    self._submit_single(
+                        cfg.task, cfg.executor, params,
+                        python_env=cfg.python_env,
+                        after=after,
+                        allow_failure_from=allow_failure_from,
+                    )
+                )
 
         return job_ids
 
@@ -354,44 +407,56 @@ class TaskRunner:
         logger.info("Sweep expanded to %d combinations", len(combos))
         return combos
 
-    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> list[str]:
-        """Prepare and submit one or more jobs (multi-shard aware).
+    def _submit_single(
+        self,
+        task_name: str,
+        executor_name: str,
+        params: dict[str, Any],
+        *,
+        python_env: PythonEnv | None = None,
+        after: list[str] | None = None,
+        allow_failure_from: set[str] | None = None,
+    ) -> list[str]:
+        """Enqueue one or more jobs in QUEUED state (heartbeat does the actual submit).
 
         Returns a list of job IDs — one per :class:`TaskSpec` returned by
-        the task's ``prepare_many`` method.
+        the task's ``prepare_many`` method. Sweeps therefore produce one
+        QUEUED row per shard. Each new job receives one ``job_dependencies``
+        edge per id in ``after``; ids in ``allow_failure_from`` get
+        ``allow_failure=1`` on their edge.
         """
-        # 1. Resolve task plugin and expand shards
         task_cls = get_task_class(task_name)
         task = task_cls()
         specs: list[TaskSpec] = task.prepare_many(params)
 
+        after = list(after or [])
+        allow_failure_from = set(allow_failure_from or set())
+        params_template = yaml.safe_dump(params, sort_keys=False)
+
         job_ids: list[str] = []
         for task_spec in specs:
-            # 2. Propagate task-level python_env into metadata for executors to consume
             if python_env is not None:
                 task_spec.metadata["python_env"] = python_env
 
-            # 3. Record in DB
-            job_id = self._db.insert(task_name, executor_name, params)
-
-            # 4. Resolve executor and submit
-            try:
-                executor = resolve_executor(executor_name, self.executor_configs)
-                self._db.update_status(job_id, JobStatus.SUBMITTED)
-                remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
-                log_path = task_spec.metadata.get("log_path")
-                self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
-                logger.info(
-                    "Job %s submitted → executor=%s, remote_id=%s",
-                    job_id, executor_name, remote_job_id,
+            job_id = self._db.enqueue(
+                task_name=task_name,
+                executor=executor_name,
+                params_template=params_template,
+                parameters=params,
+            )
+            for parent_id in after:
+                self._db.insert_dependency(
+                    child_job_id=job_id,
+                    parent_job_id=parent_id,
+                    allow_failure=(parent_id in allow_failure_from),
                 )
-            except Exception as exc:
-                self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
-                logger.error("Job %s failed to submit: %s", job_id, exc)
-                raise
-
+            logger.info(
+                "Job %s queued (task=%s, executor=%s, parents=%d)",
+                job_id, task_name, executor_name, len(after),
+            )
             job_ids.append(job_id)
 
+        _warn_if_no_heartbeat()
         return job_ids
 
     @staticmethod
