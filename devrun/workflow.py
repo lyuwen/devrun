@@ -618,49 +618,53 @@ class WorkflowRunner:
     def logs(self, workflow_id: str, stage: str | None = None) -> str:
         """Retrieve logs for a workflow or specific stage.
 
-        For specific stages with executor info, delegates to the executor's
-        ``logs()`` method.  Falls back to a status summary otherwise.
-        For detached workflows, appends the background process log.
+        For skipped stages with source_job_id, fetches logs from the source job.
+        For non-skipped stages, fetches logs from the stage's job.
         """
+        # Verify workflow exists
         record = self._db.get_workflow(workflow_id)
         if not record:
             raise ValueError(f"Workflow {workflow_id} not found")
-        stages_state = json.loads(record["stages_state"])
+
+        # Get stages from workflow_jobs table (producer model)
+        stages = self._db.get_workflow_stages(workflow_id)
 
         if stage:
-            state = stages_state.get(stage)
-            if not state or not state.get("remote_job_id"):
-                return f"No logs available for stage '{stage}'"
-            remote_id = state["remote_job_id"]
-            # Try to delegate to executor for real logs
-            executor_name = state.get("executor")
-            if executor_name:
-                try:
-                    executor = resolve_executor(
-                        executor_name, executors_path=self._executors_path
-                    )
-                    return executor.logs(remote_id)
-                except Exception:
-                    logger.debug(
-                        "Could not fetch executor logs for stage %s, falling back",
-                        stage, exc_info=True,
-                    )
-            return f"Stage {stage}: remote_job_id={remote_id}, status={state['status']}"
+            # Find the requested stage
+            stage_row = next((s for s in stages if s.stage_name == stage), None)
+            if not stage_row:
+                return f"Stage '{stage}' not found in workflow {workflow_id}"
 
+            # Handle skipped stage with source_job_id
+            if stage_row.job_id is None and stage_row.source_job_id:
+                source_job = self._db.get(stage_row.source_job_id)
+                if source_job and source_job.log_path:
+                    log_text = Path(source_job.log_path).read_text() if Path(source_job.log_path).exists() else "(log file not found)"
+                    return f"Stage {stage}: skipped, using logs from source job {stage_row.source_job_id}\n\n{log_text}"
+                return f"Stage {stage}: skipped, source job {stage_row.source_job_id} has no logs"
+
+            # Handle skipped stage without source (shouldn't happen with Task #36 validation)
+            if stage_row.job_id is None:
+                return f"Stage {stage}: skipped, no source job available"
+
+            # Handle non-skipped stage
+            job = self._db.get(stage_row.job_id)
+            if job and job.log_path:
+                log_text = Path(job.log_path).read_text() if Path(job.log_path).exists() else "(log file not found)"
+                return f"Stage {stage}: job {stage_row.job_id}\n\n{log_text}"
+            return f"Stage {stage}: job {stage_row.job_id} has no logs yet"
+
+        # Show all stages summary
         lines = []
-        for name, state in stages_state.items():
-            lines.append(
-                f"{name}: status={state['status']}, remote_job_id={state.get('remote_job_id', 'N/A')}"
-            )
-
-        # Append background process log for detached workflows
-        bg_log = Path.home() / ".devrun" / "logs" / f"workflow_{workflow_id}.log"
-        if bg_log.exists():
-            log_text = bg_log.read_text().strip()
-            if log_text:
-                lines.append("")
-                lines.append(f"--- Background process log ({bg_log}) ---")
-                lines.append(log_text)
+        for s in stages:
+            if s.job_id is None and s.source_job_id:
+                lines.append(f"{s.stage_name}: skipped (source: {s.source_job_id})")
+            elif s.job_id is None:
+                lines.append(f"{s.stage_name}: skipped")
+            else:
+                job = self._db.get(s.job_id)
+                status = job.status if job else "unknown"
+                lines.append(f"{s.stage_name}: {status} (job: {s.job_id})")
 
         return "\n".join(lines)
 
