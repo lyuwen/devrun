@@ -6,19 +6,23 @@ It is built heavily with Python, Typer (CLI), Pydantic (data validation), PyYAML
 ## Architecture & Data Flow
 
 ```text
+PRODUCER SIDE:
 CLI (typer)
   ↓
-TaskRunner          ← single-task orchestration (runner.py)
+TaskRunner / WorkflowRunner  ← enqueue jobs to QUEUED, return immediately
   ↓
-ExecutorRouter      ← resolves executor name → instance (router.py)
+JobStore (SQLite)
+
+CONSUMER SIDE (async):
+HeartbeatScheduler           ← tick loop drives all async work
   ↓
-Executor Plugins    ← LocalExecutor | SSHExecutor | SlurmExecutor | HTTPExecutor
+JobStore (read QUEUED/SUBMITTED/RUNNING/CANCELING)
+  ↓
+ExecutorRouter               ← resolves executor name → instance
+  ↓
+Executor Plugins             ← LocalExecutor | SSHExecutor | SlurmExecutor | HTTPExecutor
   ↓
 Compute Backends
-
-WorkflowRunner      ← multi-stage orchestration with heartbeat polling (workflow.py)
-  ↓ (per stage)
-TaskRunner / ExecutorRouter
 ```
 
 All interactions are driven entirely by YAML configuration files.
@@ -28,10 +32,10 @@ All interactions are driven entirely by YAML configuration files.
 * **`devrun/models.py`:** Central Pydantic models. Core entity is `TaskSpec` which holds the final executed `command`, `env`, and `resources` and is returned by `Task.prepare()`.
 * **`devrun/registry.py`:** Custom decorator-based registry (`@register_task`, `@register_executor`) for automated discovery of plugins.
 * **`devrun/runner.py`:** Orchestration logic. Loads YAML configs, expands sweeps via Cartesian product, invokes task preparation, writes to DB, invokes executor plugin `submit()`, and updates DB on error. Exposes two public module-level functions shared by both `TaskRunner` and the workflow CLI: `find_configs(target, config_dirs=None)` resolves a target name or path to config file paths across the 3-layer search directories (repo defaults, user overrides, project overrides); `load_merged_config(target, overrides=None, config_dirs=None)` loads and deep-merges those configs via OmegaConf, applies CLI overrides, and returns a resolved dict. `TaskRunner._find_configs` and `_load_config` delegate to these functions internally. `TaskRunner.extract_task_params(job_id, target_task)` translates a source job's stored params into the target task's schema by delegating to that task's `BaseTask.import_from_job` classmethod — this powers `devrun run <task> --from-job <id>` and mirrors `WorkflowRunner.extract_workflow_params` at the task level.
-* **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). All four Typer apps (main, workflow, keys, presets) set `no_args_is_help=True` so invoking any group without arguments displays its help text. Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. `devrun list` discovers and displays both task configs and workflow configs (those with a `workflow` top-level key), showing each entry's type accordingly. Both `devrun run` and `devrun workflow run` accept `--from-job <job_id>` to import params from a previous job; the source job's params are translated to the target's schema (via `BaseTask.import_from_job` for tasks, `_PARAM_MAPPING` for workflows) and merged before CLI overrides. The job id may also be a negative integer (`-1`, `-2`, …) referring to the N-th most recent compatible job in history — for `devrun run` "compatible" means the source task's params translate via the target's `import_from_job`; for `workflow run` it means the source task matches at least one stage of the workflow. `workflow run` accepts a target as a name, name/variation, or literal file path, using the same hierarchical config resolution as task configs via `load_merged_config()` (3-layer merge: repo defaults < user overrides < project overrides). It also accepts `--start-after <stage>` to skip completed stages, `--detach/-d` for background execution, `--dry-run` for plan preview, and trailing OmegaConf overrides (e.g. `params.model_name=X`). Merge order for both `run` and `workflow run`: YAML base → from-job params → CLI overrides.
+* **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). All four Typer apps (main, workflow, keys, presets) set `no_args_is_help=True` so invoking any group without arguments displays its help text. Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. `devrun list` discovers and displays both task configs and workflow configs (those with a `workflow` top-level key), showing each entry's type accordingly. `devrun run` accepts `--after <job_id>` to add a dependency edge and `--allow-failure-from <subset>` to mark edges as allow_failure. `devrun workflow run` accepts `--from-job <job_id>` and `--start-after <stage>` (requires --from-job) to import params from a previous job; the source job's params are translated to the target's schema (via `BaseTask.import_from_job` for tasks, `_PARAM_MAPPING` for workflows) and merged before CLI overrides. The job id may also be a negative integer (`-1`, `-2`, …) referring to the N-th most recent compatible job in history — for `devrun run` "compatible" means the source task's params translate via the target's `import_from_job`; for `workflow run` it means the source task matches at least one stage of the workflow. `workflow run` accepts a target as a name, name/variation, or literal file path, using the same hierarchical config resolution as task configs via `load_merged_config()` (3-layer merge: repo defaults < user overrides < project overrides). It also accepts `--start-after <stage>` (requires `--from-job`) to skip completed stages, `--dry-run` for plan preview, and trailing OmegaConf overrides (e.g. `params.model_name=X`). Merge order for both `run` and `workflow run`: YAML base → from-job params → CLI overrides.
 * **`devrun/db/jobs.py`:** Persistent SQLite job store with both `jobs` and `workflows` tables.
-* **`devrun/workflow.py`:** Multi-stage workflow engine with heartbeat-based polling, dependency resolution, timeout handling, and dry-run mode. Orchestrates stage transitions through pending → submitted → running → completed/failed/skipped/skipped_by_user. Supports `start_after` to skip stages and their transitive dependencies, `run_detached()` for background execution, `extract_workflow_params()` to pull params from existing jobs, and `<REQUIRED:…>` placeholder validation before submission. Workflow configs now go through the same hierarchical search and OmegaConf merge pipeline as task configs, via `load_merged_config()` in the CLI layer. The `WorkflowRunner` class itself is unchanged -- it still receives a fully-parsed `WorkflowConfig`.
-* **`devrun/heartbeat.py`:** Global scheduler. Loops `tick()` at a configurable interval. Each tick runs five phases in order: stale-lease reclaim, workflow-deadline expiry, cascade-skip of dependents, promotion of ready `QUEUED` jobs (claim CAS → resolve params with `JobRefContext` → executor submit → `finalize_submit`), and poll of active jobs. PR2 lands the scheduler; producers still use legacy paths until PR3.
+* **`devrun/workflow.py`:** Multi-stage workflow producer. Builds stage plan, validates `<REQUIRED:…>` placeholders, calls `JobStore.enqueue_workflow()` atomically, and returns immediately. No polling loop. Supports `--start-after <stage>` (requires `--from-job`) to skip upstream stages, `--from-job` to import params and rewrite `${stages:...}` → `${jobs:...}` references, `extract_workflow_params()` to pull params from existing jobs, and dry-run mode for plan preview. Workflow configs go through the same hierarchical search and OmegaConf merge pipeline as task configs via `load_merged_config()`.
+* **`devrun/heartbeat.py`:** Global scheduler and async consumer. Loops `tick()` at a configurable interval. Each tick runs five phases in order: stale-lease reclaim, workflow-deadline expiry, cascade-skip of dependents, promotion of ready `QUEUED` jobs (claim CAS → resolve params with `JobRefContext` → executor submit → `finalize_submit`), and poll of active jobs (SUBMITTED/RUNNING/CANCELING). Producers (`devrun run`, `devrun workflow run`) enqueue to QUEUED; heartbeat drives all async work.
 * **`devrun/services/`:** Cross-platform service management. `get_service()` dispatches on `sys.platform` to `SystemdUserService` (Linux, `systemctl --user`) or `LaunchdService` (macOS, `launchctl` + LaunchAgent plist). Both implement `install/uninstall/start/stop/restart/is_active`.
 * **`devrun/cli_heartbeat.py`:** Typer subapp wired as `devrun heartbeat`. Subcommands: foreground (default), `install`, `uninstall`, `start`, `stop`, `restart`, `status`.
 * **`devrun/utils/templates.py`:** Jinja2 template rendering utility with `shell_quote` filter (`shlex.quote`) and `StrictUndefined` mode. Templates live in `devrun/templates/`.
@@ -168,7 +172,7 @@ python -m pytest tests/ -v
 
 ### Test Coverage
 
-- **895 tests passing**, **10 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
+- **889 tests passing**, **16 skipped** (infrastructure-dependent: require real SSH/Slurm connectivity)
 - Unit tests for all major components (models, registry, database, router, runner, tasks, executors, workflow engine)
 - Integration tests between modules
 - End-to-end workflow tests
