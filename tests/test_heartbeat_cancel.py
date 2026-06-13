@@ -53,11 +53,12 @@ def test_canceling_transitions_to_cancelled(tmp_path: Path):
     assert JobStatus(rec.status) == JobStatus.CANCELLED
 
 
-def test_canceling_executor_cancel_failure_still_transitions(tmp_path: Path):
-    """executor.cancel() raising should NOT prevent the CANCELED transition.
+def test_canceling_executor_cancel_failure_retries(tmp_path: Path):
+    """executor.cancel() raising must NOT prematurely finalize CANCELLED.
 
-    Per plan Task 6 Step 2: ``try: executor.cancel(...) except Exception: log``
-    then unconditionally ``db.update_status(..., CANCELLED)``.
+    The row stays CANCELING so the next tick can retry the executor call.
+    Without this, a transient network blip would silently mark the remote job
+    as cancelled while it's still running.
     """
     db = JobStore(tmp_path / "jobs.db")
     jid = db.enqueue(
@@ -77,7 +78,7 @@ def test_canceling_executor_cancel_failure_still_transitions(tmp_path: Path):
 
     rec = db.get(jid)
     assert rec is not None
-    assert JobStatus(rec.status) == JobStatus.CANCELLED
+    assert JobStatus(rec.status) == JobStatus.CANCELING
 
 
 def test_canceling_does_not_call_status(tmp_path: Path):

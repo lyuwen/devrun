@@ -42,7 +42,7 @@ def foreground(ctx: typer.Context) -> None:
 
 @heartbeat_app.command()
 def run() -> None:
-    """Alias for the default foreground loop (skips the service-active guard)."""
+    """Run foreground without service-active guard (for manual supervision)."""
     from devrun.heartbeat import run_loop
 
     tick_file = _tick_file_path()
@@ -52,11 +52,13 @@ def run() -> None:
 
 @heartbeat_app.command()
 def install() -> None:
-    """Install the heartbeat as a managed service (systemd --user / launchd)."""
+    """Install the heartbeat as a managed service (systemd --user / launchd) and start it."""
     from devrun.services import get_service
 
-    get_service().install(python_path=sys.executable, db_path=str(default_db_path()))
-    typer.echo("Installed heartbeat service.")
+    svc = get_service()
+    svc.install(python_path=sys.executable, db_path=str(default_db_path()))
+    svc.start()
+    typer.echo("Installed and started heartbeat service.")
 
 
 @heartbeat_app.command()

@@ -26,7 +26,7 @@ _REQUIRED_RE = re.compile(r"^<REQUIRED(?::\s*.*?)?>$")
 
 _EXECUTOR_STATUS_MAP: dict[str, JobStatus] = {
     "running": JobStatus.RUNNING,
-    "pending": JobStatus.PENDING,
+    "pending": JobStatus.SUBMITTED,
     "completed": JobStatus.COMPLETED,
     "done": JobStatus.COMPLETED,
     "failed": JobStatus.FAILED,
@@ -40,7 +40,7 @@ _EXECUTOR_STATUS_MAP: dict[str, JobStatus] = {
     "deadline": JobStatus.FAILED,
     "stopped": JobStatus.FAILED,
     "suspended": JobStatus.RUNNING,
-    "requeued": JobStatus.PENDING,
+    "requeued": JobStatus.SUBMITTED,
     "resizing": JobStatus.RUNNING,
 }
 
@@ -184,11 +184,12 @@ def _poll_active_jobs(db: JobStore, executor_router: Any) -> None:
         if current == JobStatus.CANCELING:
             try:
                 executor.cancel(remote_id)
-            except Exception:
-                logger.exception(
-                    "executor.cancel(%s) failed for job %s; finalizing CANCELLED anyway",
-                    remote_id, rec.job_id,
+            except Exception as exc:
+                logger.warning(
+                    "executor.cancel(%s) failed for job %s: %s; will retry next tick",
+                    remote_id, rec.job_id, exc,
                 )
+                continue
             db.update_status(rec.job_id, JobStatus.CANCELLED, completed_at=_now())
             logger.info("Job %s: canceling -> cancelled (remote=%s)", rec.job_id, remote_id)
             continue
@@ -224,12 +225,12 @@ def run_loop(
     tick_file: Path | None = None,
 ) -> None:
     """Foreground loop. Catches SIGTERM/SIGINT; exits cleanly after the current tick."""
-    from devrun.router import resolve_executor  # local import to avoid cycles  # noqa: F401
+    from devrun.router import ExecutorRouter
 
     db = JobStore(db_path)
-    router: Any = None  # PR2 placeholder; replaced once promotion/poll phases land
-    signal.signal(signal.SIGTERM, lambda *_: _shutdown_event.set())
-    signal.signal(signal.SIGINT, lambda *_: _shutdown_event.set())
+    router = ExecutorRouter()
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
     logger.info(
         "Heartbeat starting (interval=%ss, instance=%s)", interval, instance_id()
     )
@@ -242,6 +243,12 @@ def run_loop(
             tick_file.write_text(_now().isoformat())
         _shutdown_event.wait(interval)
     logger.info("Heartbeat shut down cleanly")
+
+
+def _request_shutdown(signum: int, frame: Any) -> None:  # pragma: no cover - signal path
+    """SIGTERM/SIGINT handler: ask the run_loop to exit after the current tick."""
+    del signum, frame
+    _shutdown_event.set()
 
 
 def main() -> None:

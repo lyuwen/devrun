@@ -46,7 +46,7 @@ def test_heartbeat_foreground_refuses_when_service_active(tmp_path: Path, monkey
 
 
 def test_heartbeat_install_invokes_service(tmp_path: Path, monkeypatch):
-    """`devrun heartbeat install` delegates to ``get_service().install(...)``."""
+    """`devrun heartbeat install` calls ``get_service().install(...)`` then ``.start()``."""
     fake_db = tmp_path / "jobs.db"
     monkeypatch.setattr(
         "devrun.cli_heartbeat.default_db_path", lambda: fake_db, raising=True
@@ -59,6 +59,7 @@ def test_heartbeat_install_invokes_service(tmp_path: Path, monkeypatch):
     kwargs = fake_service.install.call_args.kwargs
     assert kwargs["db_path"] == str(fake_db)
     assert kwargs["python_path"]
+    fake_service.start.assert_called_once()
 
 
 def test_heartbeat_start_stop_restart_uninstall_invoke_service(tmp_path: Path, monkeypatch):

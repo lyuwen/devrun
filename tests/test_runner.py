@@ -475,9 +475,9 @@ class TestMapStatus:
         assert result == JobStatus.RUNNING
 
     def test_map_pending(self):
-        """Verify 'pending' maps to PENDING status."""
+        """Verify 'pending' maps to SUBMITTED (keeps the row in the active polling set)."""
         result = TaskRunner._map_status("pending")
-        assert result == JobStatus.PENDING
+        assert result == JobStatus.SUBMITTED
 
     def test_map_completed(self):
         """Verify 'completed' maps to COMPLETED status."""

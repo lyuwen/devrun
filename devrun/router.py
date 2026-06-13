@@ -69,3 +69,26 @@ def resolve_executor(
     instance = cls(name=executor_name, config=entry)
     logger.info("Resolved executor '%s' → %s", executor_name, instance)
     return instance
+
+
+class ExecutorRouter:
+    """Thin facade used by the heartbeat to resolve and cache executors by name.
+
+    Loads ``executors.yaml`` once on first ``get()`` and reuses the resulting
+    config map; each ``get(name)`` instantiates a fresh executor via
+    :func:`resolve_executor` so that backends can hold per-job mutable state
+    (e.g. SSH log tokens, sbatch script paths) without leaking across jobs.
+    """
+
+    def __init__(self, executors_path: str | Path | None = None) -> None:
+        self._executors_path = executors_path
+        self._configs: dict[str, ExecutorEntry] | None = None
+
+    def _ensure_configs(self) -> dict[str, ExecutorEntry]:
+        if self._configs is None:
+            self._configs = load_executor_configs(self._executors_path)
+        return self._configs
+
+    def get(self, name: str) -> BaseExecutor:
+        """Return an executor instance for *name* (raises KeyError if unknown)."""
+        return resolve_executor(name, self._ensure_configs(), self._executors_path)
