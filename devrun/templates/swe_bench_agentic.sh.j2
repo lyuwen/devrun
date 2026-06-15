@@ -2,7 +2,7 @@
    Rendered by SWEBenchAgenticTask.prepare() via devrun/utils/templates.py.
 
    Required variables:
-     dataset, model_name, run_name, max_iterations, ds_dir,
+     base_dir (optional), dataset, model_name, run_name, max_iterations, ds_dir,
      task_id_format, output_dir,
      max_attempts, run_infer_max_attempts, script, llm_config,
      llm_config_content, split, select_dir, workspace, extra_flags,
@@ -17,6 +17,9 @@
 {% for d in git_safe_dirs %}
 git config --global --add safe.directory {{ d | shell_quote }}
 {% endfor %}
+{% if base_dir is defined and base_dir %}
+cd {{ base_dir | shell_quote }}
+{% endif %}
 
 export DATASET={{ dataset | shell_quote }}
 export MODEL_NAME={{ model_name | shell_quote }}

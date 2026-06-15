@@ -150,6 +150,7 @@ class SWEBenchAgenticTask(BaseTask):
             )
 
         # --- resolve output_dir and run_name ---
+        base_dir = params.get("base_dir")  # Optional base directory for all paths
         output_dir = params.get("output_dir")
         if not output_dir:
             logs_dir = params.get("logs_dir", "logs")
@@ -157,6 +158,10 @@ class SWEBenchAgenticTask(BaseTask):
                 import datetime
                 run_name = f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
             output_dir = f"{logs_dir}/{run_name}"
+
+        # If base_dir is specified and output_dir is relative, prepend base_dir
+        if base_dir and not Path(output_dir).is_absolute():
+            output_dir = f"{base_dir}/{output_dir}"
 
         dataset = params.get("dataset")
         if not dataset:
@@ -189,6 +194,7 @@ class SWEBenchAgenticTask(BaseTask):
         # Render the bash command via Jinja2 template
         command = render_template(
             "swe_bench_agentic.sh.j2",
+            base_dir=base_dir,
             env_commands=env_commands,
             git_safe_dirs=git_safe_dirs,
             dataset=dataset,
