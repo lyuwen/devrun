@@ -234,8 +234,10 @@ class TestE2EJobLifecycle:
                 original_record = runner._db.get(original_id)
                 original_params = original_record.params_dict
 
-                # Verify params are stored
-                assert original_params == {"model": "test"}
+                # Verify params are stored (working_dir is auto-added)
+                assert "model" in original_params
+                assert original_params["model"] == "test"
+                assert "working_dir" in original_params  # Auto-added to all jobs
 
                 # Rerun
                 new_ids = runner.rerun(original_id)

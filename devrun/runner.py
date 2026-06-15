@@ -353,6 +353,9 @@ class TaskRunner:
 
         This ensures that when jobs are executed by the heartbeat daemon from
         a different working directory, paths still resolve correctly.
+
+        Also sets working_dir to cwd if not explicitly provided, so jobs
+        remember where they were submitted from.
         """
         from pathlib import Path
         import os
@@ -361,6 +364,11 @@ class TaskRunner:
         path_keys = {"output_dir", "working_dir", "logs_dir"}
 
         resolved = params.copy()
+
+        # Default working_dir to current directory if not set
+        if "working_dir" not in resolved or not resolved["working_dir"]:
+            resolved["working_dir"] = str(Path.cwd())
+
         for key in path_keys:
             value = resolved.get(key)
             if value and isinstance(value, str):
