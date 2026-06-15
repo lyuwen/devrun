@@ -858,3 +858,141 @@ def test_expire_workflow_ignores_skipped_source_only_stages():
             "SELECT status FROM workflows WHERE workflow_id=?", (wf_id,)
         ).fetchone()
         assert wf_row["status"] == JobStatus.TIMED_OUT.value
+
+
+# ============================================================================
+# Carry-over fix #14 — finalize_submit must clear skip_reason on success
+# ============================================================================
+
+
+def test_finalize_submit_clears_stale_skip_reason():
+    """A reclaimed job that successfully retries must not carry forward the
+    'reclaimed after stale lease' annotation to the final SUBMITTED row.
+
+    Without this fix the user sees a 'failed/reclaimed' annotation on a
+    perfectly healthy job in `devrun history`.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        jid = store.enqueue(
+            task_name="t", executor="e", params_template="", parameters={}
+        )
+
+        # Simulate the reclaim cycle: lease expires while SUBMITTING with
+        # NULL remote_job_id; reclaim_expired_leases() annotates skip_reason
+        # and sends the row back to QUEUED. The job then wins the next claim.
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        store._conn.execute(
+            "UPDATE jobs SET status='submitting', claimed_by='oldhost:1', "
+            "claimed_at=?, claim_expires_at=? WHERE job_id=?",
+            (past, past, jid),
+        )
+        store._conn.commit()
+        store.reclaim_expired_leases(now=datetime.now(timezone.utc))
+
+        # Confirm the annotation landed.
+        before = store._conn.execute(
+            "SELECT skip_reason FROM jobs WHERE job_id=?", (jid,)
+        ).fetchone()
+        assert before["skip_reason"] is not None
+        assert "reclaimed" in before["skip_reason"].lower()
+
+        # Successful retry: claim → finalize.
+        assert store.claim_for_submit(
+            job_id=jid, instance_id="newhost:2", lease_seconds=20
+        ) is True
+        store.finalize_submit(
+            job_id=jid,
+            remote_job_id="remote-ok",
+            log_path="/tmp/ok.log",
+            resolved_parameters={"x": 1},
+        )
+
+        rec = store.get(jid)
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.SUBMITTED
+        # The crucial assertion: skip_reason must be cleared.
+        row = store._conn.execute(
+            "SELECT skip_reason FROM jobs WHERE job_id=?", (jid,)
+        ).fetchone()
+        assert row["skip_reason"] is None, (
+            f"skip_reason must be NULL after successful retry; "
+            f"got {row['skip_reason']!r}"
+        )
+
+
+# ============================================================================
+# Carry-over fix #15 — request_cancel must handle legacy PENDING rows
+# ============================================================================
+
+
+def test_request_cancel_handles_legacy_pending_row():
+    """A pre-heartbeat PENDING row must be cancellable without hanging.
+
+    Before the fix, request_cancel falls into the 'else' branch and sets the
+    row to CANCELING. Heartbeat does not poll CANCELING rows whose status is
+    not SUBMITTED/RUNNING (in the canonical lifecycle), so the row would stay
+    CANCELING forever. Acceptable post-fix outcomes:
+      (a) row transitions directly to CANCELLED, OR
+      (b) request_cancel raises ValueError with a clear "legacy" message.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+
+        # Insert a legacy PENDING row directly (mimics a row created by
+        # pre-PR2 code paths that haven't been migrated).
+        now = datetime.now(timezone.utc).isoformat()
+        store._conn.execute(
+            "INSERT INTO jobs (job_id, task_name, executor, parameters, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("legacy_job_1", "t", "local", "{}", JobStatus.PENDING.value, now),
+        )
+        store._conn.commit()
+
+        try:
+            new_status = store.request_cancel("legacy_job_1")
+        except ValueError as exc:
+            # Option (b): explicit refusal — must mention legacy / pending /
+            # not cancellable so the user can act on it.
+            msg = str(exc).lower()
+            assert (
+                "legacy" in msg or "pending" in msg or "cannot cancel" in msg
+            ), f"ValueError must explain why; got: {exc!r}"
+            return
+
+        # Option (a): direct CANCELLED transition (NOT stuck at CANCELING).
+        assert new_status == JobStatus.CANCELLED, (
+            f"legacy PENDING row must go to CANCELLED, not {new_status}; "
+            f"otherwise it would be stuck (heartbeat ignores non-canonical CANCELING)."
+        )
+        rec = store.get("legacy_job_1")
+        assert rec is not None
+        assert JobStatus(rec.status) == JobStatus.CANCELLED
+
+
+def test_request_cancel_legacy_pending_does_not_create_canceling_zombie():
+    """Belt-and-suspenders: ensure no CANCELING zombie row even if the impl
+    chooses option (a) above. After request_cancel, no CANCELING row for a
+    legacy PENDING input should exist.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        store = JobStore(Path(td) / "test.db")
+        now = datetime.now(timezone.utc).isoformat()
+        store._conn.execute(
+            "INSERT INTO jobs (job_id, task_name, executor, parameters, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("legacy_pending_2", "t", "local", "{}", JobStatus.PENDING.value, now),
+        )
+        store._conn.commit()
+
+        try:
+            store.request_cancel("legacy_pending_2")
+        except ValueError:
+            pass
+
+        rec = store.get("legacy_pending_2")
+        assert rec is not None
+        assert JobStatus(rec.status) != JobStatus.CANCELING, (
+            "Legacy PENDING row must NOT be left in CANCELING — heartbeat would "
+            "never poll it and the user is stuck."
+        )
