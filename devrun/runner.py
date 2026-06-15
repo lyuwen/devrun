@@ -204,6 +204,10 @@ class TaskRunner:
                 task_cls = get_task_class(cfg.task)
                 task = task_cls()
                 specs: list[TaskSpec] = task.prepare_many(params)
+
+                # Resolve executor to get python_env setup
+                executor = resolve_executor(cfg.executor, self.executor_configs)
+
                 for i, spec in enumerate(specs):
                     label = f"spec {i + 1}/{len(specs)}" if len(specs) > 1 else "spec"
                     header = (
@@ -216,6 +220,21 @@ class TaskRunner:
                         lines.append(f"# resources: {spec.resources}")
                     if spec.env:
                         lines.append(f"# env: {spec.env}")
+
+                    # Show python_env setup
+                    task_python_env = cfg.python_env
+                    executor_env = getattr(executor, '_python_env', None)
+
+                    if task_python_env or executor_env:
+                        from devrun.executors.base import BaseExecutor
+                        merged_env = BaseExecutor._resolve_python_env(executor_env, task_python_env)
+                        if merged_env:
+                            setup_lines = BaseExecutor._env_to_shell_lines(merged_env)
+                            if setup_lines:
+                                lines.append(f"# python_env:")
+                                for setup_line in setup_lines:
+                                    lines.append(f"#   {setup_line}")
+
                     lines.append("")
                     lines.append(spec.command)
                     print("\n".join(lines))
