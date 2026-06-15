@@ -327,15 +327,35 @@ def _style_status(status: str) -> str:
 
 @app.command()
 def status(
-    job_id: str = typer.Argument(..., help="Job ID to query"),
+    job_id: str = typer.Argument(..., help="Job ID to query (or use '-- -1' for most recent)"),
     with_deps: bool = typer.Option(
         False, "--with-deps", help="List parent job IDs and statuses for this job."
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Check the status of a submitted job (pure DB read)."""
+    """Check the status of a submitted job (pure DB read).
+
+    Supports relative indexing with '--' separator: '-- -1' = most recent job, '-- -2' = second most recent, etc.
+
+    Examples:
+        devrun status abc123         # Query by job ID
+        devrun status -- -1          # Query most recent job
+        devrun status -- -3          # Query 3rd most recent job
+    """
     _setup_logging(verbose)
     runner = _runner()
+
+    # Resolve negative index to actual job_id
+    if len(job_id) > 1 and job_id[0] == "-" and job_id[1:].isdigit() and int(job_id) < 0:
+        n = -int(job_id)
+        recent = runner.history(limit=n)
+        if len(recent) < n:
+            console.print(f"[red]Error:[/red] Only {len(recent)} jobs in history, cannot resolve index {job_id}")
+            raise typer.Exit(code=1)
+        resolved_id = recent[n - 1]["job_id"]
+        console.print(f"[dim]Resolved {job_id} → {resolved_id}[/dim]")
+        job_id = resolved_id
+
     info = runner.status(job_id)
     if "error" in info:
         console.print(f"[red]{info['error']}[/red]")
