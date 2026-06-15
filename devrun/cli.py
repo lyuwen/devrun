@@ -327,7 +327,7 @@ def _style_status(status: str) -> str:
 
 @app.command()
 def status(
-    job_id: str = typer.Argument(..., help="Job ID to query (or use '-- -1' for most recent)"),
+    job_id: str = typer.Argument(..., help="Job ID to query (or ~1, ~2, etc. for recent jobs)"),
     with_deps: bool = typer.Option(
         False, "--with-deps", help="List parent job IDs and statuses for this job."
     ),
@@ -335,19 +335,22 @@ def status(
 ) -> None:
     """Check the status of a submitted job (pure DB read).
 
-    Supports relative indexing with '--' separator: '-- -1' = most recent job, '-- -2' = second most recent, etc.
+    Supports relative indexing with tilde: ~1 = most recent job, ~2 = second most recent, etc.
 
     Examples:
         devrun status abc123         # Query by job ID
-        devrun status -- -1          # Query most recent job
-        devrun status -- -3          # Query 3rd most recent job
+        devrun status ~1             # Query most recent job
+        devrun status ~3             # Query 3rd most recent job
     """
     _setup_logging(verbose)
     runner = _runner()
 
-    # Resolve negative index to actual job_id
-    if len(job_id) > 1 and job_id[0] == "-" and job_id[1:].isdigit() and int(job_id) < 0:
-        n = -int(job_id)
+    # Resolve tilde index to actual job_id
+    if len(job_id) > 1 and job_id[0] == "~" and job_id[1:].isdigit():
+        n = int(job_id[1:])
+        if n < 1:
+            console.print(f"[red]Error:[/red] Index must be positive (got {job_id})")
+            raise typer.Exit(code=1)
         recent = runner.history(limit=n)
         if len(recent) < n:
             console.print(f"[red]Error:[/red] Only {len(recent)} jobs in history, cannot resolve index {job_id}")
