@@ -348,6 +348,29 @@ class TaskRunner:
         return TaskConfig(**raw)
 
     @staticmethod
+    def _resolve_relative_paths(params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve relative paths in params to absolute paths based on cwd.
+
+        This ensures that when jobs are executed by the heartbeat daemon from
+        a different working directory, paths still resolve correctly.
+        """
+        from pathlib import Path
+        import os
+
+        # Path keys that should be resolved to absolute paths
+        path_keys = {"output_dir", "working_dir", "logs_dir"}
+
+        resolved = params.copy()
+        for key in path_keys:
+            value = resolved.get(key)
+            if value and isinstance(value, str):
+                path = Path(value)
+                if not path.is_absolute():
+                    resolved[key] = str(Path.cwd() / path)
+
+        return resolved
+
+    @staticmethod
     def _expand_sweep(cfg: TaskConfig) -> list[dict[str, Any]]:
         """Expand a sweep config into a list of concrete param dicts."""
         if not cfg.sweep:
@@ -385,6 +408,10 @@ class TaskRunner:
         """
         task_cls = get_task_class(task_name)
         task = task_cls()
+
+        # Resolve relative paths to absolute before enqueuing
+        params = self._resolve_relative_paths(params)
+
         specs: list[TaskSpec] = task.prepare_many(params)
 
         after = list(after or [])
