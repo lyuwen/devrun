@@ -30,15 +30,16 @@ class SWEBenchCollectTask(BaseTask):
     ) -> dict[str, Any]:
         """Translate a ``swe_bench_agentic`` job's params into collect params.
 
-        Mirrors the in-stage propagation done by ``swe_bench_workflow``:
-        ``output_dir`` (auto-derived from ``logs_dir``/``run_name`` if absent)
-        and ``model_name`` is renamed to ``model_name_or_path``.
+        Imports output_dir (or derives it from logs_dir/run_name) and working_dir
+        to ensure the collect job writes to the same location as the source agentic
+        job, which is critical when running via heartbeat.
         """
         if source_task != "swe_bench_agentic":
             return {}
 
         imported: dict[str, Any] = {}
 
+        # Import or derive output_dir
         output_dir = source_params.get("output_dir")
         if not output_dir:
             run_name = source_params.get("run_name")
@@ -48,6 +49,7 @@ class SWEBenchCollectTask(BaseTask):
         if output_dir:
             imported["output_dir"] = output_dir
 
+        # Import dataset/split/working_dir
         for key in ("dataset", "split", "working_dir"):
             val = source_params.get(key)
             if val:
