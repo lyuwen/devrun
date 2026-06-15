@@ -351,6 +351,16 @@ def status(
             table.add_row(key, str(val))
     console.print(table)
 
+    # Show why QUEUED jobs aren't progressing
+    from devrun.db.blocking_info import get_blocking_info
+    blocking = get_blocking_info(runner._db, job_id)
+    if blocking:
+        explanation = blocking.explain()
+        if blocking.is_blocked:
+            console.print(f"\n[yellow]⚠ Blocking reason:[/yellow]\n{explanation}")
+        else:
+            console.print(f"\n[dim]{explanation}[/dim]")
+
     if with_deps:
         deps = runner._db.list_dependencies(job_id)
         deps_table = Table(title=f"Parents of {job_id}")
