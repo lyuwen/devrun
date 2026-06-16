@@ -5,7 +5,7 @@
      base_dir (optional), dataset, model_name, run_name, max_iterations, ds_dir,
      task_id_format, output_dir,
      max_attempts, run_infer_max_attempts, script, llm_config,
-     llm_config_content, split, select_dir, workspace, extra_flags,
+     llm_config_content, split, select_dir, workspace, extra_flags, script_args,
      env_commands, env_vars, git_safe_dirs
 
    Note: working_dir (from TaskSpec) is where the job was submitted from.
@@ -77,7 +77,9 @@ for attempt in {1..{{ max_attempts }}}; do
         --select {{ select_dir | shell_quote }}/${num}.txt \
         --workspace {{ workspace | shell_quote }} \
         --output-dir "${OUTPUT_PATH}"{% for flag in extra_flags %} \
-        {{ flag }}{% endfor %}
+        {{ flag }}{% endfor %}{% for arg_name, arg_value in script_args.items() %}{% if arg_value is sameas true %} \
+        --{{ arg_name | replace('_', '-') }}{% elif arg_value is not sameas false %} \
+        --{{ arg_name | replace('_', '-') }} {{ arg_value | string | shell_quote }}{% endif %}{% endfor %}
 
     # Post-run completion check
     if ls "${OUTPUT_PATH}/${DS_DIR}"/*/*/output.jsonl >/dev/null 2>&1; then
