@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import uuid
 from pathlib import Path
@@ -119,7 +120,7 @@ class SlurmExecutor(BaseExecutor):
             walltime=resources.get("walltime", "04:00:00"),
             env=task_spec.env,
             extra_sbatch=self._extra_sbatch + resources.get("extra_sbatch", []),
-            working_dir=task_spec.working_dir,
+            working_dir=None,  # Don't put cd in script - use sbatch --chdir instead
             setup_commands=setup_lines,
             output_dir=task_spec.working_dir,
             set_e=task_spec.metadata.get("set_e", True),
@@ -134,7 +135,12 @@ class SlurmExecutor(BaseExecutor):
 
         submit_path = self._upload_script(str(script_path), f"/tmp/devrun_sbatch_{job_name}_{suffix}.sh")
 
-        result = self._run_cmd(f"sbatch {submit_path}")
+        # Use sbatch --chdir to set working directory (where sbatch is executed from)
+        # This is separate from any cd commands in the script itself (e.g., base_dir)
+        chdir_arg = f"--chdir={shlex.quote(task_spec.working_dir)}" if task_spec.working_dir else ""
+        sbatch_cmd = f"sbatch {chdir_arg} {submit_path}".strip()
+
+        result = self._run_cmd(sbatch_cmd)
         if result.returncode != 0:
             raise RuntimeError(f"sbatch failed: {result.stderr}")
 

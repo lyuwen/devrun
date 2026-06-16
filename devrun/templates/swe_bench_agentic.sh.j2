@@ -8,6 +8,8 @@
      llm_config_content, split, select_dir, workspace, extra_flags,
      env_commands, env_vars, git_safe_dirs
 
+   Note: working_dir (from TaskSpec) is where the job was submitted from.
+         base_dir is where the benchmark scripts should run.
 #}
 {# env_commands are rendered raw intentionally — they are arbitrary shell
    preamble lines provided by the user (e.g. conda activate, module load). #}
