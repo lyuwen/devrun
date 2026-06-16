@@ -221,19 +221,22 @@ class TaskRunner:
                     if spec.env:
                         lines.append(f"# env: {spec.env}")
 
-                    # Show python_env setup
+                    # Show python_env setup (only for real executors, not mocks)
                     task_python_env = cfg.python_env
                     executor_env = getattr(executor, '_python_env', None)
 
-                    if task_python_env or executor_env:
-                        from devrun.executors.base import BaseExecutor
-                        merged_env = BaseExecutor._resolve_python_env(executor_env, task_python_env)
-                        if merged_env:
-                            setup_lines = BaseExecutor._env_to_shell_lines(merged_env)
-                            if setup_lines:
-                                lines.append(f"# python_env:")
-                                for setup_line in setup_lines:
-                                    lines.append(f"#   {setup_line}")
+                    # Check if we have real PythonEnv objects (not mocks)
+                    from devrun.models import PythonEnv
+                    if isinstance(executor_env, PythonEnv) or isinstance(task_python_env, PythonEnv) or (task_python_env is None and executor_env is None):
+                        if task_python_env or executor_env:
+                            from devrun.executors.base import BaseExecutor
+                            merged_env = BaseExecutor._resolve_python_env(executor_env, task_python_env)
+                            if merged_env:
+                                setup_lines = BaseExecutor._env_to_shell_lines(merged_env)
+                                if setup_lines:
+                                    lines.append(f"# python_env:")
+                                    for setup_line in setup_lines:
+                                        lines.append(f"#   {setup_line}")
 
                     lines.append("")
                     lines.append(spec.command)
@@ -443,18 +446,41 @@ class TaskRunner:
 
         after = list(after or [])
         allow_failure_from = set(allow_failure_from or set())
-        params_template = yaml.safe_dump(params, sort_keys=False)
+
+        # Extract instances/job_ids for per-spec param customization
+        job_ids_list = params.get("job_ids")
+        instances = params.get("instances")
+        if job_ids_list:
+            instance_list = [{"JOB_ID": jid.strip()} for jid in str(job_ids_list).split(",")]
+        elif instances:
+            instance_list = instances
+        else:
+            instance_list = [None] * len(specs)
 
         job_ids: list[str] = []
-        for task_spec in specs:
+        for spec_idx, task_spec in enumerate(specs):
             if python_env is not None:
                 task_spec.metadata["python_env"] = python_env
+
+            # Build per-job params: include instance-specific data so heartbeat
+            # can reproduce the same spec
+            job_params = dict(params)
+            if instance_list[spec_idx] is not None:
+                # Replace multi-instance config with single-instance to ensure
+                # prepare_many returns exactly this one spec
+                job_params["instances"] = [instance_list[spec_idx]]
+                job_params.pop("job_ids", None)  # Remove shorthand
+            # Store python_env in params for heartbeat to use
+            if python_env is not None:
+                job_params["_python_env"] = python_env.model_dump() if hasattr(python_env, "model_dump") else python_env
+
+            params_template = yaml.safe_dump(job_params, sort_keys=False)
 
             job_id = self._db.enqueue(
                 task_name=task_name,
                 executor=executor_name,
                 params_template=params_template,
-                parameters=params,
+                parameters=job_params,
             )
             for parent_id in after:
                 self._db.insert_dependency(

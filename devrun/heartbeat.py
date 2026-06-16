@@ -145,8 +145,18 @@ def _promote_ready_queued(db: JobStore, executor_router: Any) -> None:
                     skip_reason="unfilled <REQUIRED:...> placeholder",
                 )
                 continue
+
+            # Extract python_env if it was stored by the producer
+            python_env_dict = resolved.pop("_python_env", None)
+
             task = get_task_class(cand.task_name)()
             spec = task.prepare(resolved)
+
+            # Apply python_env to the spec's metadata so the executor uses it
+            if python_env_dict:
+                from devrun.models import PythonEnv
+                spec.metadata["python_env"] = PythonEnv(**python_env_dict)
+
             executor = executor_router.get(cand.executor)
             remote_job_id = executor.submit_with_retry(spec)
             log_path = spec.metadata.get("log_path")
