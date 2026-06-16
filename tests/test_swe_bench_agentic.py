@@ -414,6 +414,52 @@ class TestInstancesAutoSharding:
         # False values should be omitted
         assert "--disable-logging" not in spec.command
 
+    def test_script_args_underscore_to_hyphen(self):
+        """Argument names with underscores should convert to hyphens."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={"batch_size": 16, "max_workers": 4}
+        ))
+        assert "--batch-size 16" in spec.command
+        assert "--max-workers 4" in spec.command
+        assert "batch_size" not in spec.command  # no underscores
+
+    def test_script_args_boolean_flags(self):
+        """True values should produce bare flags, False should be omitted."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={
+                "verbose": True,
+                "debug": True,
+                "quiet": False,
+            }
+        ))
+        assert "--verbose" in spec.command
+        assert "--debug" in spec.command
+        assert "--quiet" not in spec.command
+
+    def test_script_args_shell_quoting(self):
+        """Argument values with special chars should be shell-quoted."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={
+                "output_path": "/tmp/test dir/output",
+                "pattern": "*.py",
+            }
+        ))
+        # Values should be quoted
+        assert "'/tmp/test dir/output'" in spec.command or '"/tmp/test dir/output"' in spec.command
+        assert "'*.py'" in spec.command or '"*.py"' in spec.command
+
+    def test_script_args_empty_dict(self):
+        """Empty script_args should not affect command."""
+        task = SWEBenchAgenticTask()
+        spec_with_empty = task.prepare(_make_params(script_args={}))
+        spec_without = task.prepare(_make_params())
+        # Both should produce valid commands (no errors)
+        assert "python" in spec_with_empty.command
+        assert "python" in spec_without.command
+
     def test_instances_single(self):
         """1 instance → single spec with full array range."""
         task = SWEBenchAgenticTask()
