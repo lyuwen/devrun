@@ -91,8 +91,20 @@ class SlurmExecutor(BaseExecutor):
 
         # Resolve python environment: executor-level merged with task-level
         task_python_env = task_spec.metadata.get("python_env")
+        self.logger.debug(
+            "submit(): task_python_env from metadata = %s (type: %s)",
+            task_python_env, type(task_python_env)
+        )
         merged_env = self._resolve_python_env(self._python_env, task_python_env)
+        self.logger.debug(
+            "submit(): merged_env after resolve = %s",
+            merged_env
+        )
         setup_lines = self._env_to_shell_lines(merged_env) if merged_env else []
+        self.logger.debug(
+            "submit(): setup_lines = %s",
+            setup_lines
+        )
         # Append any legacy setup_commands from extra: for backward compat
         setup_lines = self._legacy_setup_commands + setup_lines
 

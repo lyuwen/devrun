@@ -148,6 +148,10 @@ def _promote_ready_queued(db: JobStore, executor_router: Any) -> None:
 
             # Extract python_env if it was stored by the producer
             python_env_dict = resolved.pop("_python_env", None)
+            logger.debug(
+                "Job %s: extracted _python_env = %s",
+                cand.job_id, python_env_dict
+            )
 
             task = get_task_class(cand.task_name)()
             spec = task.prepare(resolved)
@@ -156,6 +160,12 @@ def _promote_ready_queued(db: JobStore, executor_router: Any) -> None:
             if python_env_dict:
                 from devrun.models import PythonEnv
                 spec.metadata["python_env"] = PythonEnv(**python_env_dict)
+                logger.debug(
+                    "Job %s: applied python_env to spec.metadata: %s",
+                    cand.job_id, spec.metadata["python_env"]
+                )
+            else:
+                logger.debug("Job %s: no _python_env to apply", cand.job_id)
 
             executor = executor_router.get(cand.executor)
             remote_job_id = executor.submit_with_retry(spec)
