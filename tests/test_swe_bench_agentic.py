@@ -396,6 +396,24 @@ class TestInstancesAutoSharding:
         assert any("0000-0049" in e for e in extra0)
         assert any("0050-0099" in e for e in extra1)
 
+    def test_prepare_script_args_in_command(self):
+        """script_args dict should appear as CLI arguments in command."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={
+                "batch_size": 32,
+                "temperature": 0.7,
+                "enable_cache": True,
+                "disable_logging": False,
+            }
+        ))
+        # Check that args appear in command
+        assert "--batch-size 32" in spec.command
+        assert "--temperature 0.7" in spec.command
+        assert "--enable-cache" in spec.command
+        # False values should be omitted
+        assert "--disable-logging" not in spec.command
+
     def test_instances_single(self):
         """1 instance → single spec with full array range."""
         task = SWEBenchAgenticTask()

@@ -107,6 +107,18 @@ class SWEBenchAgenticTask(BaseTask):
         """Override in subclasses to provide extra default flags."""
         return params.get("extra_flags", ["--use-legacy-tools", "--bind-dev-sdk"])
 
+    def _get_script_args(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Override in subclasses to provide custom script arguments.
+
+        Returns a dict mapping argument names to values:
+          {"arg_name": "value"}  → --arg-name value
+          {"flag": True}         → --flag
+          {"flag": False}        → (omitted)
+
+        Argument names with underscores are converted to hyphens automatically.
+        """
+        return params.get("script_args", {})
+
     def prepare(self, params: dict[str, Any]) -> TaskSpec:
         model_name = params.get("model_name")
         run_name = params.get("run_name")
@@ -187,6 +199,7 @@ class SWEBenchAgenticTask(BaseTask):
 
         script = self._get_run_script(params)
         flags = self._get_default_flags(params)
+        script_args = self._get_script_args(params)
         env_commands = params.get("env_commands", [])
         env_vars = params.get("env", {})
         git_safe_dirs = params.get("git_safe_dirs", [])
@@ -213,6 +226,7 @@ class SWEBenchAgenticTask(BaseTask):
             select_dir=select_dir,
             workspace=workspace,
             extra_flags=flags,
+            script_args=script_args,
             env_vars=env_vars,
         )
 
