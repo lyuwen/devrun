@@ -942,3 +942,59 @@ class TestConfigVariations:
             data = yaml.safe_load(f)
         assert data["params"]["run_infer_max_attempts"] == 5
         assert data["params"]["task_id_format"] == "%03d"
+
+
+class TestScriptArgsSubclassing:
+    """Tests for _get_script_args hook override pattern."""
+
+    def test_subclass_can_override_script_args(self):
+        """Subclass can override _get_script_args to provide custom arguments."""
+        from typing import Any
+
+        class CustomEvalTask(SWEBenchAgenticTask):
+            def _get_script_args(self, params: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "evaluator_mode": params.get("mode", "strict"),
+                    "enable_cache": True,
+                    "metrics": ",".join(params.get("metrics", ["accuracy"])),
+                }
+
+        task = CustomEvalTask()
+        spec = task.prepare(_make_params(
+            mode="lenient",
+            metrics=["f1", "recall"],
+        ))
+        assert "--evaluator-mode lenient" in spec.command
+        assert "--enable-cache" in spec.command
+        assert "--metrics f1,recall" in spec.command
+
+    def test_subclass_can_merge_params_and_defaults(self):
+        """Subclass can merge params.script_args with defaults."""
+        from typing import Any
+
+        class TaskWithDefaultArgs(SWEBenchAgenticTask):
+            def _get_script_args(self, params: dict[str, Any]) -> dict[str, Any]:
+                # Start with defaults
+                args = {"default_arg": "default_value"}
+                # Merge in params-level script_args if present
+                args.update(params.get("script_args", {}))
+                return args
+
+        task = TaskWithDefaultArgs()
+
+        # Without params override - gets defaults only
+        spec1 = task.prepare(_make_params())
+        assert "--default-arg default_value" in spec1.command
+
+        # With params override - defaults + overrides merged
+        spec2 = task.prepare(_make_params(
+            script_args={"custom_arg": "custom_value"}
+        ))
+        assert "--default-arg default_value" in spec2.command
+        assert "--custom-arg custom_value" in spec2.command
+
+        # With params override replacing default
+        spec3 = task.prepare(_make_params(
+            script_args={"default_arg": "overridden"}
+        ))
+        assert "--default-arg overridden" in spec3.command
