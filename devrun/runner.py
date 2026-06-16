@@ -470,6 +470,29 @@ class TaskRunner:
                 # prepare_many returns exactly this one spec
                 job_params["instances"] = [instance_list[spec_idx]]
                 job_params.pop("job_ids", None)  # Remove shorthand
+
+                # Merge instance env vars into job_params["env"] so heartbeat
+                # can expand {JOB_ID} and other placeholders in the template
+                job_params.setdefault("env", {}).update(instance_list[spec_idx])
+
+                # Extract sharded array range from TaskSpec if present
+                # prepare_many() splits the array range across instances, but the
+                # sharded value only exists in the TaskSpec's extra_sbatch directives.
+                # We need to capture it back into job_params so heartbeat can reproduce
+                # the same sharded array when it calls prepare() again.
+                extra_sbatch = task_spec.resources.get("extra_sbatch", [])
+                for directive in extra_sbatch:
+                    if directive.startswith("--array "):
+                        # Extract "000-124%16" from "--array 000-124%16"
+                        array_value = directive.split(" ", 1)[1]
+                        # Remove concurrency limit suffix to get just the range
+                        if "%" in array_value:
+                            array_range, concurrency = array_value.split("%", 1)
+                            job_params["array"] = array_range
+                            # concurrency_limit is already in params
+                        else:
+                            job_params["array"] = array_value
+                        break
             # Store python_env in params for heartbeat to use
             if python_env is not None:
                 job_params["_python_env"] = python_env.model_dump() if hasattr(python_env, "model_dump") else python_env
