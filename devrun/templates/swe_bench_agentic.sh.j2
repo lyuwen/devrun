@@ -77,7 +77,7 @@ for attempt in {1..{{ max_attempts }}}; do
         --select {{ select_dir | shell_quote }}/${num}.txt \
         --workspace {{ workspace | shell_quote }} \
         --output-dir "${OUTPUT_PATH}"{% for flag in extra_flags %} \
-        {{ flag }}{% endfor %}{% for arg_name, arg_value in script_args.items() %}{% if arg_value is sameas true %} \
+        {{ flag }}{% endfor %}{% for arg_name, arg_value in (script_args | default({})).items() %}{% if arg_value is sameas true %} \
         --{{ arg_name | replace('_', '-') }}{% elif arg_value is not sameas false %} \
         --{{ arg_name | replace('_', '-') }} {{ arg_value | string | shell_quote }}{% endif %}{% endfor %}
 
