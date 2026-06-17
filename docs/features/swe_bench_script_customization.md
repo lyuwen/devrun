@@ -234,3 +234,31 @@ params:
   job_ids: "id1,id2,id3"
   # Still works exactly as before
 ```
+
+## Slurm Job Submission Options
+
+### Hold Flag
+
+Submit jobs in a held state using the `hold` parameter. Jobs submitted with this flag will not start until manually released using `scontrol release <job_id>`.
+
+```yaml
+task: swe_bench_agentic
+executor: slurm
+params:
+  dataset: /data/SWE-bench_Verified
+  llm_config: configs/gpt4.json
+  hold: true  # Submit job in held state
+```
+
+This adds `--hold` to the sbatch command, allowing you to:
+- Review the job before it starts
+- Set up dependencies or conditions before execution
+- Stage jobs and release them in a controlled manner
+
+**Release a held job:**
+```bash
+scontrol release <job_id>
+```
+
+**Default:** Jobs are submitted immediately (no hold) unless `hold: true` is specified.
+```
