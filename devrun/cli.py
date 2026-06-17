@@ -886,11 +886,31 @@ def workflow_status(
     table.add_row("Created", record["created_at"])
     table.add_row("Completed", record.get("completed_at") or "—")
 
-    stages = json.loads(record.get("stages_state", "{}"))
-    for name, state in stages.items():
-        status_str = state.get("status", "unknown")
-        job_id = state.get("job_id", "—")
-        table.add_row(f"  Stage: {name}", f"{status_str} (job: {job_id})")
+    # Read stage information from workflow_jobs table (producer model)
+    # Use the same database as the WorkflowRunner
+    stage_rows = runner._db.get_workflow_stages(workflow_id)
+
+    for stage_row in stage_rows:
+        if stage_row.job_id is None:
+            # Skipped stage (--from-job with --start-after)
+            table.add_row(
+                f"  Stage: {stage_row.stage_name}",
+                f"skipped (source: {stage_row.source_job_id or '—'})"
+            )
+        else:
+            # Regular stage with a job
+            job_record = runner._db.get(stage_row.job_id)
+            if job_record:
+                status_str = job_record.status.value if hasattr(job_record.status, 'value') else str(job_record.status)
+                table.add_row(
+                    f"  Stage: {stage_row.stage_name}",
+                    f"{status_str} (job: {stage_row.job_id})"
+                )
+            else:
+                table.add_row(
+                    f"  Stage: {stage_row.stage_name}",
+                    f"job not found (job: {stage_row.job_id})"
+                )
 
     console.print(table)
 
