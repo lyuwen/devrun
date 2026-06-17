@@ -12,6 +12,7 @@ from typing import Any
 from devrun.models import TaskSpec
 from devrun.registry import register_task
 from devrun.tasks.base import BaseTask
+from devrun.utils.pattern_expansion import expand_patterns
 from devrun.utils.swebench import derive_ds_dir
 from devrun.utils.templates import render_template
 
@@ -285,7 +286,8 @@ class SWEBenchAgenticTask(BaseTask):
         """
         job_ids = params.get("job_ids")
         if job_ids:
-            instances = [{"JOB_ID": jid.strip()} for jid in str(job_ids).split(",")]
+            expanded = expand_patterns(str(job_ids))
+            instances = [{"JOB_ID": jid.strip()} for jid in expanded]
         else:
             instances = params.get("instances")
         if not instances:

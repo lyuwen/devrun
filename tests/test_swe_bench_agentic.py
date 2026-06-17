@@ -1010,3 +1010,48 @@ class TestScriptArgsSubclassing:
             script_args={"default_arg": "overridden"}
         ))
         assert "--default-arg overridden" in spec3.command
+
+
+class TestJobIdsPatternExpansion:
+    """Tests for job_ids pattern expansion integration."""
+
+    def test_job_ids_pattern_expansion(self):
+        """job_ids with pattern should expand to multiple instances."""
+        task = SWEBenchAgenticTask()
+        specs = task.prepare_many(_make_params(
+            job_ids="job-[1-3]",
+            array="000-002"
+        ))
+        assert len(specs) == 3
+        # Check that JOB_ID env var is set correctly in each spec
+        assert "JOB_ID" in specs[0].env
+        assert specs[0].env["JOB_ID"] == "job-1"
+        assert specs[1].env["JOB_ID"] == "job-2"
+        assert specs[2].env["JOB_ID"] == "job-3"
+
+    def test_job_ids_mixed_pattern(self):
+        """job_ids with mixed ranges and lists."""
+        task = SWEBenchAgenticTask()
+        specs = task.prepare_many(_make_params(
+            job_ids="172.16.1.[157-159,161-163]",
+            array="000-005"
+        ))
+        assert len(specs) == 6
+        expected_ids = [
+            "172.16.1.157", "172.16.1.158", "172.16.1.159",
+            "172.16.1.161", "172.16.1.162", "172.16.1.163"
+        ]
+        for i, spec in enumerate(specs):
+            assert spec.env["JOB_ID"] == expected_ids[i]
+
+    def test_job_ids_backward_compatibility(self):
+        """Plain comma-separated job_ids still works."""
+        task = SWEBenchAgenticTask()
+        specs = task.prepare_many(_make_params(
+            job_ids="id1,id2,id3",
+            array="000-002"
+        ))
+        assert len(specs) == 3
+        assert specs[0].env["JOB_ID"] == "id1"
+        assert specs[1].env["JOB_ID"] == "id2"
+        assert specs[2].env["JOB_ID"] == "id3"
