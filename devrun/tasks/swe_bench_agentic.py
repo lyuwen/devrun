@@ -204,9 +204,12 @@ class SWEBenchAgenticTask(BaseTask):
         env_vars = params.get("env", {})
         git_safe_dirs = params.get("git_safe_dirs", [])
 
+        # Allow custom template override
+        template_name = params.get("template", "swe_bench_agentic.sh.j2")
+
         # Render the bash command via Jinja2 template
         command = render_template(
-            "swe_bench_agentic.sh.j2",
+            template_name,
             base_dir=base_dir,
             env_commands=env_commands,
             git_safe_dirs=git_safe_dirs,

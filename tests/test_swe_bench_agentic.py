@@ -460,6 +460,18 @@ class TestInstancesAutoSharding:
         assert "python" in spec_with_empty.command
         assert "python" in spec_without.command
 
+    def test_prepare_custom_template(self, tmp_path):
+        """Custom template parameter should override default template."""
+        # Create a minimal custom template
+        custom_template = tmp_path / "custom.sh.j2"
+        custom_template.write_text("echo 'CUSTOM_MARKER'\npython {{ script }}")
+
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            template=str(custom_template)
+        ))
+        assert "CUSTOM_MARKER" in spec.command
+
     def test_instances_single(self):
         """1 instance → single spec with full array range."""
         task = SWEBenchAgenticTask()
