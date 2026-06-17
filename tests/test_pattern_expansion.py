@@ -51,6 +51,33 @@ class TestExpandRangeHelper:
         assert result == ["42"]
 
 
+class TestErrorCases:
+    def test_invalid_range_start_greater_than_end(self):
+        """[10-5] raises ValueError."""
+        with pytest.raises(ValueError, match="Range start 10 > end 5"):
+            expand_patterns("[10-5]")
+
+    def test_non_numeric_range(self):
+        """[abc-xyz] treats as literal (non-numeric ranges don't raise)."""
+        result = expand_patterns("[abc-xyz]")
+        assert result == ["abc-xyz"]
+
+    def test_unclosed_bracket(self):
+        """[1-3 raises ValueError."""
+        with pytest.raises(ValueError, match="Unclosed bracket"):
+            expand_patterns("[1-3")
+
+    def test_nested_brackets(self):
+        """[[1-3]] raises ValueError."""
+        with pytest.raises(ValueError, match="Nested brackets"):
+            expand_patterns("[[1-3]]")
+
+    def test_empty_bracket(self):
+        """[] raises ValueError."""
+        with pytest.raises(ValueError, match="Empty bracket"):
+            expand_patterns("[]")
+
+
 class TestEdgeCases:
     def test_no_brackets(self):
         """Plain string returns as-is."""
@@ -58,29 +85,40 @@ class TestEdgeCases:
         assert result == ["job-123"]
 
     def test_empty_string(self):
-        """Empty input returns empty list."""
+        """Empty string returns empty list."""
         result = expand_patterns("")
         assert result == []
 
     def test_whitespace_only(self):
-        """Whitespace-only input returns empty list."""
+        """Whitespace-only string returns empty list."""
         result = expand_patterns("   ")
         assert result == []
 
-    def test_unclosed_bracket(self):
-        """Raises ValueError for unclosed bracket."""
-        with pytest.raises(ValueError, match="Unclosed bracket"):
-            expand_patterns("job-[1-5")
+    def test_whitespace_in_bracket(self):
+        """[ 1 - 3 , 5 ] handles whitespace correctly."""
+        result = expand_patterns("[ 1 - 3 , 5 ]")
+        assert result == ["1", "2", "3", "5"]
 
-    def test_empty_bracket(self):
-        """Raises ValueError for empty bracket."""
-        with pytest.raises(ValueError, match="Empty bracket"):
-            expand_patterns("job-[]")
+    def test_single_item_range(self):
+        """[5-5] returns single item."""
+        assert expand_patterns("[5-5]") == ["5"]
 
-    def test_nested_brackets(self):
-        """Raises ValueError for nested brackets."""
-        with pytest.raises(ValueError, match="Nested brackets not supported"):
-            expand_patterns("job-[1-[5-10]]")
+    def test_literal_with_hyphen(self):
+        """[abc-def,ghi] treats abc-def as literal (non-numeric)."""
+        result = expand_patterns("[abc-def,ghi]")
+        assert result == ["abc-def", "ghi"]
+
+    def test_mixed_padding(self):
+        """[1-3,001-003] uses different padding per range."""
+        result = expand_patterns("[1-3,001-003]")
+        assert result == ["1", "2", "3", "001", "002", "003"]
+
+    def test_padding_overflow(self):
+        """[01-100] uses max(start_width, end_width) for padding."""
+        result = expand_patterns("[01-100]")
+        assert result[0] == "001"  # max(2, 3) = 3 digits
+        assert result[98] == "099"
+        assert result[99] == "100"
 
 
 class TestExplicitLists:
