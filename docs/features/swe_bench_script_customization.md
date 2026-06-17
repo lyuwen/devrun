@@ -172,3 +172,65 @@ command = render_template(
 ```
 
 Templates iterate over `script_args.items()` and render arguments with proper shell quoting and boolean flag handling.
+
+## Pattern Expansion for job_ids
+
+The `job_ids` parameter supports pattern expansion for convenient specification of multiple job IDs.
+
+### Range Syntax
+
+Use `[start-end]` to expand numeric ranges:
+
+```yaml
+params:
+  job_ids: "172.16.1.[157-163]"
+  # Expands to: 172.16.1.157, 172.16.1.158, ..., 172.16.1.163
+```
+
+Padding is auto-detected from the first number:
+```yaml
+params:
+  job_ids: "job-[001-005]"
+  # Expands to: job-001, job-002, job-003, job-004, job-005
+```
+
+### Explicit List Syntax
+
+Use `[item,item,item]` for non-sequential values:
+
+```yaml
+params:
+  job_ids: "job-[001,002,004,005]"
+  # Expands to: job-001, job-002, job-004, job-005
+```
+
+### Mixed Ranges and Lists
+
+Combine ranges and lists within a single bracket:
+
+```yaml
+params:
+  job_ids: "172.16.1.[157-159,161-163]"
+  # Expands to: 172.16.1.157, 172.16.1.158, 172.16.1.159,
+  #             172.16.1.161, 172.16.1.162, 172.16.1.163
+```
+
+### Multiple Patterns
+
+Separate multiple patterns with commas:
+
+```yaml
+params:
+  job_ids: "static-id,job-[1-3],host-[a,b]"
+  # Expands to: static-id, job-1, job-2, job-3, host-a, host-b
+```
+
+### Backward Compatibility
+
+Plain comma-separated lists continue to work unchanged:
+
+```yaml
+params:
+  job_ids: "id1,id2,id3"
+  # Still works exactly as before
+```
