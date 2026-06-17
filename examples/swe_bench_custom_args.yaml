@@ -1,0 +1,11 @@
+# Example 1: Simple script_args in config
+task: swe_bench_agentic
+executor: slurm_pascal
+params:
+  dataset: /mnt/data/SWE-bench_Verified
+  llm_config: configs/gpt4-turbo.json
+  script_args:
+    batch_size: 32
+    temperature: 0.7
+    enable_cache: true
+    disable_logging: false  # false values are omitted
