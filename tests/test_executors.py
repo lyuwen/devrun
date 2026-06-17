@@ -355,4 +355,86 @@ class TestExecutorIntegration:
 
             job_id = executor.submit(spec)
             assert isinstance(job_id, str)
+
+
+class TestSlurmExecutor:
+    """Tests for SlurmExecutor."""
+
+    @pytest.fixture
+    def mock_slurm_executor(self):
+        """Provide a mocked SlurmExecutor for testing."""
+        from devrun.executors.slurm import SlurmExecutor
+
+        entry = ExecutorEntry(type="slurm", partition="default")
+        executor = SlurmExecutor(name="test_slurm", config=entry)
+        return executor
+
+    def test_submit_with_hold_flag(self, mock_slurm_executor, temp_dir):
+        """Verify submit adds --hold flag when hold=True in resources."""
+        spec = TaskSpec(
+            command="echo test",
+            working_dir=str(temp_dir),
+            resources={"hold": True}
+        )
+
+        with patch.object(mock_slurm_executor, "_run_cmd") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Submitted batch job 12345\n",
+                stderr=""
+            )
+
+            job_id = mock_slurm_executor.submit(spec)
+
+            # Verify sbatch was called with --hold flag
+            mock_run.assert_called_once()
+            sbatch_cmd = mock_run.call_args[0][0]
+            assert "--hold" in sbatch_cmd
+            assert job_id == "12345"
+
+    def test_submit_without_hold_flag(self, mock_slurm_executor, temp_dir):
+        """Verify submit does not add --hold flag when hold is not set."""
+        spec = TaskSpec(
+            command="echo test",
+            working_dir=str(temp_dir),
+            resources={}
+        )
+
+        with patch.object(mock_slurm_executor, "_run_cmd") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Submitted batch job 12345\n",
+                stderr=""
+            )
+
+            job_id = mock_slurm_executor.submit(spec)
+
+            # Verify sbatch was called without --hold flag
+            mock_run.assert_called_once()
+            sbatch_cmd = mock_run.call_args[0][0]
+            assert "--hold" not in sbatch_cmd
+            assert job_id == "12345"
+
+    def test_submit_with_hold_false(self, mock_slurm_executor, temp_dir):
+        """Verify submit does not add --hold flag when hold=False."""
+        spec = TaskSpec(
+            command="echo test",
+            working_dir=str(temp_dir),
+            resources={"hold": False}
+        )
+
+        with patch.object(mock_slurm_executor, "_run_cmd") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Submitted batch job 12345\n",
+                stderr=""
+            )
+
+            job_id = mock_slurm_executor.submit(spec)
+
+            # Verify sbatch was called without --hold flag
+            mock_run.assert_called_once()
+            sbatch_cmd = mock_run.call_args[0][0]
+            assert "--hold" not in sbatch_cmd
+            assert job_id == "12345"
             assert len(job_id) > 0

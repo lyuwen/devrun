@@ -138,7 +138,11 @@ class SlurmExecutor(BaseExecutor):
         # Use sbatch --chdir to set working directory (where sbatch is executed from)
         # This is separate from any cd commands in the script itself (e.g., base_dir)
         chdir_arg = f"--chdir={shlex.quote(task_spec.working_dir)}" if task_spec.working_dir else ""
-        sbatch_cmd = f"sbatch {chdir_arg} {submit_path}".strip()
+
+        # Add --hold flag if requested
+        hold_arg = "--hold" if resources.get("hold", False) else ""
+
+        sbatch_cmd = f"sbatch {chdir_arg} {hold_arg} {submit_path}".strip()
 
         result = self._run_cmd(sbatch_cmd)
         if result.returncode != 0:
