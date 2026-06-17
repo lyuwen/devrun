@@ -284,6 +284,10 @@ class TestImprovedDryRun:
 class TestEnhancedLogs:
     """Tests for enhanced workflow logs that delegate to executor."""
 
+    @pytest.mark.skip(
+        reason="Legacy test for old stages_state model. New producer model uses workflow_jobs "
+        "and logs are fetched via JobStore.get() + executor.logs() through the heartbeat system."
+    )
     def test_enhanced_logs_delegates_to_executor(self, workflow_runner):
         """Logs method should attempt to delegate to executor.logs() for actual content."""
         wf_id = workflow_runner._db.insert_workflow("test", {

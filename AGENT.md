@@ -27,6 +27,26 @@ Compute Backends
 
 All interactions are driven entirely by YAML configuration files.
 
+## Critical Design Principle: Producer-Consumer Separation
+
+**IMPORTANT**: The job queuing (producer) and execution/submission (consumer) are completely decoupled:
+
+- **Producer side** (`devrun run`, `devrun workflow run`): Runs in the user's local environment with their local file paths, environment variables, and working directory. Writes jobs to SQLite as QUEUED with `params_template` (unresolved YAML) and `parameters` (dict snapshot).
+
+- **Consumer side** (`devrun heartbeat`): Runs as a background service, potentially in a different environment, with different paths and env vars. Reads QUEUED jobs, resolves `${jobs:...}` references via `JobRefContext`, expands templates, and submits to executors.
+
+**Key implications for development:**
+
+1. **Variable tracking**: All parameter references (`${jobs:...}`, `${stages:...}`) must be rewritten at enqueue time to use job IDs, not stage names. The consumer has no access to the workflow config or stage names—only the `params_template` stored in the job row.
+
+2. **Environment isolation**: Do NOT assume the heartbeat sees the same environment as the producer. Paths, env vars, and working directories can differ. All necessary context must be serialized into the job row.
+
+3. **Template resolution timing**: `params_template` stored at enqueue is the YAML string with `${jobs:...}` placeholders. Resolution happens at promotion time in the heartbeat, not at enqueue time.
+
+4. **Idempotency**: The same `params_template` must resolve to the same command/env/resources regardless of when/where the heartbeat runs, given the same parent job outputs.
+
+5. **Breaking changes**: Any change to how `params_template` is generated, how references are rewritten, or how resolution works at promotion time is a **breaking change** that can cause in-flight workflows to fail. Test thoroughly with workflows that have cross-stage dependencies.
+
 ## High-Level Modules
 
 * **`devrun/models.py`:** Central Pydantic models. Core entity is `TaskSpec` which holds the final executed `command`, `env`, and `resources` and is returned by `Task.prepare()`.
@@ -35,7 +55,7 @@ All interactions are driven entirely by YAML configuration files.
 * **`devrun/cli.py`:** User entry point with Typer commands: `run`, `list`, `status`, `logs`, `history`, `rerun`, `sync`, `fetch`, plus the `workflow` subcommand group (`workflow run`, `workflow status`, `workflow list`, `workflow logs`, `workflow cancel`). All four Typer apps (main, workflow, keys, presets) set `no_args_is_help=True` so invoking any group without arguments displays its help text. Supports command-line autocompletion for tasks and context-aware task help via `devrun run <task> --help`. `devrun list` discovers and displays both task configs and workflow configs (those with a `workflow` top-level key), showing each entry's type accordingly. `devrun run` accepts `--after <job_id>` to add a dependency edge and `--allow-failure-from <subset>` to mark edges as allow_failure. `devrun workflow run` accepts `--from-job <job_id>` and `--start-after <stage>` (requires --from-job) to import params from a previous job; the source job's params are translated to the target's schema (via `BaseTask.import_from_job` for tasks, `_PARAM_MAPPING` for workflows) and merged before CLI overrides. The job id may also be a negative integer (`-1`, `-2`, …) referring to the N-th most recent compatible job in history — for `devrun run` "compatible" means the source task's params translate via the target's `import_from_job`; for `workflow run` it means the source task matches at least one stage of the workflow. `workflow run` accepts a target as a name, name/variation, or literal file path, using the same hierarchical config resolution as task configs via `load_merged_config()` (3-layer merge: repo defaults < user overrides < project overrides). It also accepts `--start-after <stage>` (requires `--from-job`) to skip completed stages, `--dry-run` for plan preview, and trailing OmegaConf overrides (e.g. `params.model_name=X`). Merge order for both `run` and `workflow run`: YAML base → from-job params → CLI overrides.
 * **`devrun/db/jobs.py`:** Persistent SQLite job store with both `jobs` and `workflows` tables.
 * **`devrun/workflow.py`:** Multi-stage workflow producer. Builds stage plan, validates `<REQUIRED:…>` placeholders, calls `JobStore.enqueue_workflow()` atomically, and returns immediately. No polling loop. Supports `--start-after <stage>` (requires `--from-job`) to skip upstream stages, `--from-job` to import params and rewrite `${stages:...}` → `${jobs:...}` references, `extract_workflow_params()` to pull params from existing jobs, and dry-run mode for plan preview. Workflow configs go through the same hierarchical search and OmegaConf merge pipeline as task configs via `load_merged_config()`.
-* **`devrun/heartbeat.py`:** Global scheduler and async consumer. Loops `tick()` at a configurable interval. Each tick runs five phases in order: stale-lease reclaim, workflow-deadline expiry, cascade-skip of dependents, promotion of ready `QUEUED` jobs (claim CAS → resolve params with `JobRefContext` → executor submit → `finalize_submit`), and poll of active jobs (SUBMITTED/RUNNING/CANCELING). Producers (`devrun run`, `devrun workflow run`) enqueue to QUEUED; heartbeat drives all async work.
+* **`devrun/heartbeat.py`:** Global scheduler and async consumer. Loops `tick()` at a configurable interval. Each tick runs six phases in order: stale-lease reclaim, workflow-deadline expiry, cascade-skip of dependents, promotion of ready `QUEUED` jobs (claim CAS → resolve params with `JobRefContext` → executor submit → `finalize_submit`), poll of active jobs (SUBMITTED/RUNNING/CANCELING), and workflow status aggregation (aggregate stage job states into workflow status: all completed/skipped → completed, any failed/cancelled/timed_out → failed). Producers (`devrun run`, `devrun workflow run`) enqueue to QUEUED; heartbeat drives all async work.
 * **`devrun/services/`:** Cross-platform service management. `get_service()` dispatches on `sys.platform` to `SystemdUserService` (Linux, `systemctl --user`) or `LaunchdService` (macOS, `launchctl` + LaunchAgent plist). Both implement `install/uninstall/start/stop/restart/is_active`.
 * **`devrun/cli_heartbeat.py`:** Typer subapp wired as `devrun heartbeat`. Subcommands: foreground (default), `install`, `uninstall`, `start`, `stop`, `restart`, `status`.
 * **`devrun/utils/templates.py`:** Jinja2 template rendering utility with `shell_quote` filter (`shlex.quote`) and `StrictUndefined` mode. Templates live in `devrun/templates/`.

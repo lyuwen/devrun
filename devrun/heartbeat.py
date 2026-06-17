@@ -66,14 +66,16 @@ def tick(db: JobStore, executor_router: Any) -> None:
     """Run one heartbeat tick.
 
     Phases run in fixed order: stale-lease reclaim, workflow-deadline expiry,
-    cascade-skip of dependents, promotion of ready ``QUEUED`` jobs, and poll
-    of active jobs. Each phase is a separate function for isolation testing.
+    cascade-skip of dependents, promotion of ready ``QUEUED`` jobs, poll
+    of active jobs, and workflow status aggregation. Each phase is a separate
+    function for isolation testing.
     """
     _reclaim_stale_leases(db)
     _expire_workflow_deadlines(db)
     _cascade_skip_failed(db)
     _promote_ready_queued(db, executor_router)
     _poll_active_jobs(db, executor_router)
+    _aggregate_workflow_statuses(db)
 
 
 def _reclaim_stale_leases(db: JobStore) -> None:
@@ -237,6 +239,13 @@ def _poll_active_jobs(db: JobStore, executor_router: Any) -> None:
             rec.job_id, current.value if isinstance(current, JobStatus) else current,
             mapped.value, remote_id,
         )
+
+
+def _aggregate_workflow_statuses(db: JobStore) -> None:
+    """Aggregate stage job states into workflow status."""
+    updated = db.aggregate_workflow_statuses()
+    if updated:
+        logger.info("Aggregated %d workflow(s): %s", len(updated), updated)
 
 
 def run_loop(

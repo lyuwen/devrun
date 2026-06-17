@@ -666,6 +666,64 @@ class JobStore:
             )
         logger.info("Expired workflow %s (jobs touched=%d)", workflow_id, len(rows))
 
+    def aggregate_workflow_statuses(self) -> list[str]:
+        """Aggregate stage job states into workflow status for non-terminal workflows.
+
+        Returns list of workflow_ids that were updated.
+
+        Logic:
+        - If any job is failed/cancelled/timed_out -> workflow failed
+        - If all jobs are completed/skipped -> workflow completed
+        - Otherwise -> workflow remains queued/running
+        """
+        # Fetch non-terminal workflows
+        placeholders = ",".join("?" * len(self._TERMINAL_WORKFLOW_STATUSES))
+        sql = f"SELECT workflow_id FROM workflows WHERE status NOT IN ({placeholders})"
+        rows = self._conn.execute(sql, self._TERMINAL_WORKFLOW_STATUSES).fetchall()
+
+        if not rows:
+            return []
+
+        updated: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        for r in rows:
+            wf_id = r["workflow_id"]
+
+            # Get all job statuses for this workflow
+            job_rows = self._conn.execute(
+                "SELECT j.status FROM workflow_jobs wj "
+                "JOIN jobs j ON j.job_id = wj.job_id "
+                "WHERE wj.workflow_id = ? AND wj.job_id IS NOT NULL",
+                (wf_id,),
+            ).fetchall()
+
+            if not job_rows:
+                # No jobs means workflow is still queued (e.g., all stages skipped at enqueue)
+                continue
+
+            statuses = [row["status"] for row in job_rows]
+
+            # Determine workflow status
+            new_status = None
+            if any(s in (JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.TIMED_OUT.value) for s in statuses):
+                new_status = JobStatus.FAILED.value
+            elif all(s in (JobStatus.COMPLETED.value, JobStatus.SKIPPED.value) for s in statuses):
+                new_status = JobStatus.COMPLETED.value
+
+            if new_status:
+                self._conn.execute(
+                    "UPDATE workflows SET status = ?, completed_at = ? WHERE workflow_id = ?",
+                    (new_status, now, wf_id),
+                )
+                updated.append(wf_id)
+
+        if updated:
+            self._conn.commit()
+            logger.info("Aggregated workflow status for %d workflow(s): %s", len(updated), updated)
+
+        return updated
+
     def request_cancel(self, job_id: str) -> JobStatus:
         """User-initiated cancel. Returns the new status; raises if already terminal."""
         row = self._conn.execute(

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 import re
 import uuid
@@ -15,7 +14,6 @@ import yaml
 from devrun.db.jobs import JobStore, WorkflowStageRow
 from devrun.models import JobStatus, WorkflowConfig, WorkflowStage
 from devrun.registry import get_task_class
-from devrun.router import resolve_executor
 
 logger = logging.getLogger("devrun.workflow")
 
@@ -121,10 +119,26 @@ class WorkflowRunner:
         ``job_id=None`` and ``source_job_id`` from the ``--from-job`` parameter.
         """
         stage_rows: list[WorkflowStageRow] = []
+
+        # First pass: allocate job_ids for all non-skipped stages
         job_ids: dict[str, str | None] = {}
-        for ordinal, stage in enumerate(config.stages):
+        for stage in config.stages:
             if stage.name in skip_set:
                 job_ids[stage.name] = None
+            else:
+                job_ids[stage.name] = uuid.uuid4().hex[:12]
+
+        # Build stage_map for rewriting ${stages:...} references
+        if source_job_id is not None:
+            # For --from-job workflows, map to source job's stages
+            stage_map = self._build_source_stage_map(source_job_id)
+        else:
+            # For normal workflows, map to current workflow's job_ids (non-None only)
+            stage_map = {name: jid for name, jid in job_ids.items() if jid is not None}
+
+        # Second pass: build stage rows with rewritten params_template
+        for ordinal, stage in enumerate(config.stages):
+            if stage.name in skip_set:
                 stage_rows.append(
                     WorkflowStageRow(
                         stage_name=stage.name,
@@ -138,14 +152,12 @@ class WorkflowRunner:
                     )
                 )
                 continue
-            job_id = uuid.uuid4().hex[:12]
-            job_ids[stage.name] = job_id
+
+            job_id = job_ids[stage.name]
             raw_template = yaml.safe_dump(stage.params or {}, sort_keys=False)
-            if source_job_id is not None:
-                source_stage_map = self._build_source_stage_map(source_job_id)
-                params_template = self._rewrite_stage_references(raw_template, source_stage_map)
-            else:
-                params_template = raw_template
+            # Always rewrite ${stages:...} references to ${jobs:...}
+            params_template = self._rewrite_stage_references(raw_template, stage_map)
+
             stage_rows.append(
                 WorkflowStageRow(
                     stage_name=stage.name,
@@ -589,32 +601,47 @@ class WorkflowRunner:
         record = self._db.get_workflow(workflow_id)
         if not record:
             raise ValueError(f"Workflow {workflow_id} not found")
-        stages_state = json.loads(record["stages_state"])
-        for name, state in stages_state.items():
-            remote_id = state.get("remote_job_id")
-            if state["status"] in ("submitted", "running") and remote_id:
-                logger.info("Cancelling stage %s (remote_job_id %s)", name, remote_id)
-                executor_name = state.get("executor")
-                if executor_name:
-                    try:
-                        executor = resolve_executor(
-                            executor_name, executors_path=self._executors_path
-                        )
-                        executor.cancel(remote_id)
-                    except Exception:
-                        logger.warning(
-                            "Failed to cancel remote job %s for stage %s",
-                            remote_id,
-                            name,
-                            exc_info=True,
-                        )
-                state["status"] = "cancelled"
+
+        # Read stage jobs from workflow_jobs table
+        stage_rows = self._db.get_workflow_stages(workflow_id)
+        cancelled_count = 0
+
+        for stage_row in stage_rows:
+            job_id = stage_row.job_id
+            if job_id is None:
+                continue
+
+            # Get job record
+            job_record = self._db.get(job_id)
+            if job_record is None:
+                continue
+
+            # Skip terminal jobs
+            status = JobStatus(job_record.status) if isinstance(job_record.status, str) else job_record.status
+            if status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SKIPPED, JobStatus.TIMED_OUT):
+                continue
+
+            # Cancel the job
+            try:
+                self._db.request_cancel(job_id)
+                cancelled_count += 1
+                logger.info("Requested cancel for job %s (stage %s)", job_id, stage_row.stage_name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cancel job %s for stage %s: %s",
+                    job_id,
+                    stage_row.stage_name,
+                    exc,
+                )
+
+        # Mark workflow as cancelled
         self._db.update_workflow(
             workflow_id,
             status="cancelled",
-            stages_state=stages_state,
+            stages_state={},
             completed_at=datetime.now(timezone.utc),
         )
+        logger.info("Workflow %s cancelled (%d jobs affected)", workflow_id, cancelled_count)
 
     def logs(self, workflow_id: str, stage: str | None = None) -> str:
         """Retrieve logs for a workflow or specific stage.
