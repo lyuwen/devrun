@@ -451,7 +451,9 @@ class TaskRunner:
         job_ids_list = params.get("job_ids")
         instances = params.get("instances")
         if job_ids_list:
-            instance_list = [{"JOB_ID": jid.strip()} for jid in str(job_ids_list).split(",")]
+            from devrun.utils.pattern_expansion import expand_patterns
+            expanded = expand_patterns(str(job_ids_list))
+            instance_list = [{"JOB_ID": jid.strip()} for jid in expanded]
         elif instances:
             instance_list = instances
         else:
