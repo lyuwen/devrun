@@ -240,6 +240,10 @@ class SWEBenchAgenticTask(BaseTask):
             if k in params:
                 resources[k] = params[k]
 
+        # Add hold flag if requested
+        if params.get("hold", False):
+            resources["hold"] = True
+
         array = params.get("array")
         concurrency_limit = params.get("concurrency_limit")
         extra_sbatch = []

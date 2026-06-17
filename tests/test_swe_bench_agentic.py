@@ -170,6 +170,16 @@ class TestSWEBenchAgenticTask:
         extra = spec.resources.get("extra_sbatch", [])
         assert any("oversubscribe" in e for e in extra)
 
+    def test_prepare_no_hold_by_default(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert not spec.resources.get("hold", False)
+
+    def test_prepare_hold_opt_in(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(hold=True))
+        assert spec.resources.get("hold") is True
+
     def test_prepare_task_id_format_in_command(self):
         task = SWEBenchAgenticTask()
         spec = task.prepare(_make_params(task_id_format="%04d"))
