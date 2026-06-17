@@ -35,9 +35,50 @@ def expand_patterns(pattern_str: str) -> list[str]:
     if not pattern_str or not pattern_str.strip():
         return []
 
-    # For now, delegate to _expand_single_pattern
-    # (will add top-level comma handling later)
-    return _expand_single_pattern(pattern_str.strip())
+    # Split on top-level commas (not inside brackets)
+    patterns = _split_top_level_commas(pattern_str.strip())
+
+    # Expand each pattern independently
+    result = []
+    for pattern in patterns:
+        result.extend(_expand_single_pattern(pattern.strip()))
+
+    return result
+
+
+def _split_top_level_commas(s: str) -> list[str]:
+    """Split string on commas that are NOT inside brackets.
+
+    Uses a simple state machine tracking bracket depth.
+
+    Examples:
+        >>> _split_top_level_commas("a,b,c")
+        ['a', 'b', 'c']
+
+        >>> _split_top_level_commas("a,b[1,2],c")
+        ['a', 'b[1,2]', 'c']
+    """
+    result = []
+    current = []
+    depth = 0
+
+    for char in s:
+        if char == "[":
+            depth += 1
+            current.append(char)
+        elif char == "]":
+            depth -= 1
+            current.append(char)
+        elif char == "," and depth == 0:
+            result.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+
+    if current:
+        result.append("".join(current))
+
+    return result
 
 
 def _expand_single_pattern(pattern: str) -> list[str]:

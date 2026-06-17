@@ -121,3 +121,25 @@ class TestMixedPatterns:
             "job-1-end", "job-2-end", "job-3-end", "job-5-end",
             "job-7-end", "job-8-end", "job-9-end"
         ]
+
+
+class TestMultiplePatterns:
+    def test_multiple_literals(self):
+        """a,b,c expands to three items."""
+        result = expand_patterns("a,b,c")
+        assert result == ["a", "b", "c"]
+
+    def test_mixed_literal_and_pattern(self):
+        """literal,job-[1-2] expands correctly."""
+        result = expand_patterns("literal,job-[1-2]")
+        assert result == ["literal", "job-1", "job-2"]
+
+    def test_multiple_patterns(self):
+        """static-id,job-[1-3],host-[a,b] expands all patterns."""
+        result = expand_patterns("static-id,job-[1-3],host-[a,b]")
+        assert result == ["static-id", "job-1", "job-2", "job-3", "host-a", "host-b"]
+
+    def test_ip_ranges_multiple(self):
+        """172.16.1.[1-2],192.168.1.[10-11] expands both ranges."""
+        result = expand_patterns("172.16.1.[1-2],192.168.1.[10-11]")
+        assert result == ["172.16.1.1", "172.16.1.2", "192.168.1.10", "192.168.1.11"]
