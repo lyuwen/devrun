@@ -19,11 +19,16 @@ class JobStatus(str, Enum):
     """Lifecycle states for a job."""
 
     PENDING = "pending"
+    QUEUED = "queued"
+    SUBMITTING = "submitting"
     SUBMITTED = "submitted"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELING = "canceling"
     CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+    TIMED_OUT = "timed_out"
     UNKNOWN = "unknown"
 
 
@@ -151,11 +156,16 @@ class JobRecord(BaseModel):
     task_name: str
     executor: str
     parameters: str = ""  # JSON-encoded params
+    params_template: str | None = None
     remote_job_id: str | None = None
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     log_path: str | None = None
+    skip_reason: str | None = None
+    claimed_by: str | None = None
+    claimed_at: str | None = None
+    claim_expires_at: str | None = None
 
     # Convenience helpers ------------------------------------------------
 

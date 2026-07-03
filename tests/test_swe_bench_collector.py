@@ -619,7 +619,7 @@ class TestAutoDiscoverSuffix:
     def test_deep_ds_dir_name(self, tmp_path):
         """Long DS_DIR names with many underscores should be handled correctly."""
         output_root = tmp_path / "outputs"
-        deep_ds = "__mnt__huawei__users__lfu__datasets__SWE-bench_Verified-test"
+        deep_ds = "__data__datasets__SWE-bench_Verified-test"
         _build_instance_dir(
             output_root, "000", deep_ds, "openai", "inst_1",
             output_content=_make_output_jsonl("id1", "patch"),

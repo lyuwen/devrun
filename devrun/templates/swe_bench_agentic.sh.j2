@@ -2,12 +2,14 @@
    Rendered by SWEBenchAgenticTask.prepare() via devrun/utils/templates.py.
 
    Required variables:
-     dataset, model_name, run_name, max_iterations, ds_dir,
+     base_dir (optional), dataset, model_name, run_name, max_iterations, ds_dir,
      task_id_format, output_dir,
      max_attempts, run_infer_max_attempts, script, llm_config,
-     llm_config_content, split, select_dir, workspace, extra_flags,
+     llm_config_content, split, select_dir, workspace, extra_flags, script_args,
      env_commands, env_vars, git_safe_dirs
 
+   Note: working_dir (from TaskSpec) is where the job was submitted from.
+         base_dir is where the benchmark scripts should run.
 #}
 {# env_commands are rendered raw intentionally — they are arbitrary shell
    preamble lines provided by the user (e.g. conda activate, module load). #}
@@ -17,6 +19,9 @@
 {% for d in git_safe_dirs %}
 git config --global --add safe.directory {{ d | shell_quote }}
 {% endfor %}
+{% if base_dir is defined and base_dir %}
+cd {{ base_dir | shell_quote }}
+{% endif %}
 
 export DATASET={{ dataset | shell_quote }}
 export MODEL_NAME={{ model_name | shell_quote }}
@@ -72,7 +77,9 @@ for attempt in {1..{{ max_attempts }}}; do
         --select {{ select_dir | shell_quote }}/${num}.txt \
         --workspace {{ workspace | shell_quote }} \
         --output-dir "${OUTPUT_PATH}"{% for flag in extra_flags %} \
-        {{ flag }}{% endfor %}
+        {{ flag }}{% endfor %}{% for arg_name, arg_value in (script_args | default({})).items() %}{% if arg_value is sameas true %} \
+        --{{ arg_name | replace('_', '-') }}{% elif arg_value is not sameas false %} \
+        --{{ arg_name | replace('_', '-') }} {{ arg_value | string | shell_quote }}{% endif %}{% endfor %}
 
     # Post-run completion check
     if ls "${OUTPUT_PATH}/${DS_DIR}"/*/*/output.jsonl >/dev/null 2>&1; then

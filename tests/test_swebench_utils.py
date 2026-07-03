@@ -7,8 +7,8 @@ from devrun.utils.swebench import derive_ds_dir
 
 class TestDeriveDsDir:
     def test_absolute_path_with_split(self):
-        result = derive_ds_dir("/mnt/huawei/users/lfu/datasets/SWE-bench_Verified", "test")
-        assert result == "__mnt__huawei__users__lfu__datasets__SWE-bench_Verified-test"
+        result = derive_ds_dir("/data/datasets/SWE-bench_Verified", "test")
+        assert result == "__data__datasets__SWE-bench_Verified-test"
 
     def test_leading_slash_becomes_double_underscore(self):
         result = derive_ds_dir("/data/foo", "dev")
