@@ -18,10 +18,10 @@ class TestSimpleRanges:
         result = expand_patterns("job-[1-3]")
         assert result == ["job-1", "job-2", "job-3"]
 
-    def test_range_with_prefix_and_suffix(self):
-        """172.16.1.[157-159] expands IP addresses."""
-        result = expand_patterns("172.16.1.[157-159]")
-        assert result == ["172.16.1.157", "172.16.1.158", "172.16.1.159"]
+    def test_ip_range_expansion(self):
+        """10.0.0.[101-103] expands IP addresses."""
+        result = expand_patterns("10.0.0.[101-103]")
+        assert result == ["10.0.0.101", "10.0.0.102", "10.0.0.103"]
 
 
 class TestExpandRangeHelper:
@@ -144,13 +144,14 @@ class TestMixedPatterns:
         result = expand_patterns("[1-3,5,7-9]")
         assert result == ["1", "2", "3", "5", "7", "8", "9"]
 
-    def test_ip_mixed_pattern(self):
-        """172.16.1.[157-159,161-163] expands IP ranges with gap."""
-        result = expand_patterns("172.16.1.[157-159,161-163]")
+    def test_multiple_ranges_with_gap(self):
+        """10.0.0.[101-103,111-113] expands IP ranges with gap."""
+        result = expand_patterns("10.0.0.[101-103,111-113]")
         assert result == [
-            "172.16.1.157", "172.16.1.158", "172.16.1.159",
-            "172.16.1.161", "172.16.1.162", "172.16.1.163"
+            "10.0.0.101", "10.0.0.102", "10.0.0.103",
+            "10.0.0.111", "10.0.0.112", "10.0.0.113"
         ]
+
 
     def test_mixed_with_prefix_suffix(self):
         """job-[1-3,5,7-9]-suffix expands correctly."""
@@ -177,7 +178,8 @@ class TestMultiplePatterns:
         result = expand_patterns("static-id,job-[1-3],host-[a,b]")
         assert result == ["static-id", "job-1", "job-2", "job-3", "host-a", "host-b"]
 
-    def test_ip_ranges_multiple(self):
-        """172.16.1.[1-2],192.168.1.[10-11] expands both ranges."""
-        result = expand_patterns("172.16.1.[1-2],192.168.1.[10-11]")
-        assert result == ["172.16.1.1", "172.16.1.2", "192.168.1.10", "192.168.1.11"]
+    def test_multiple_patterns_with_commas(self):
+        """10.0.0.[1-2],192.168.1.[10-11] expands both ranges."""
+        result = expand_patterns("10.0.0.[1-2],192.168.1.[10-11]")
+        assert result == ["10.0.0.1", "10.0.0.2", "192.168.1.10", "192.168.1.11"]
+

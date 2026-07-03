@@ -11,8 +11,8 @@ def derive_ds_dir(dataset: str, split: str) -> str:
 
     Example::
 
-        derive_ds_dir("/mnt/huawei/users/lfu/datasets/SWE-bench_Verified", "test")
-        # → "__mnt__huawei__users__lfu__datasets__SWE-bench_Verified-test"
+        derive_ds_dir("/data/datasets/SWE-bench_Verified", "test")
+        # → "__data__datasets__SWE-bench_Verified-test"
 
     Note: A leading ``/`` becomes a leading ``__``.
     """

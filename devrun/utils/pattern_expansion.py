@@ -26,8 +26,8 @@ def expand_patterns(pattern_str: str) -> list[str]:
         ValueError: Invalid syntax (unclosed brackets, start > end, non-numeric range)
 
     Examples:
-        >>> expand_patterns("172.16.1.[157-163]")
-        ['172.16.1.157', '172.16.1.158', ..., '172.16.1.163']
+        >>> expand_patterns("10.0.0.[101-107]")
+        ['10.0.0.101', '10.0.0.102', ..., '10.0.0.107']
 
         >>> expand_patterns("job-[001-003,005]")
         ['job-001', 'job-002', 'job-003', 'job-005']
