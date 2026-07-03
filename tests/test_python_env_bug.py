@@ -39,7 +39,7 @@ def test_heartbeat_python_env_applied_to_slurm_script(tmp_path):
             "partition": "debug",
             "python_env": {
                 "conda": "swebench",
-                "conda_path": "/mnt/huawei/users/lfu/software/conda"
+                "conda_path": "/opt/conda"
             }
         }
     }))
@@ -53,7 +53,7 @@ def test_heartbeat_python_env_applied_to_slurm_script(tmp_path):
         "executor": "slurm",
         "python_env": {
             "conda": "flex-swe",
-            "conda_path": "/mnt/huawei/users/lfu/software/conda"
+            "conda_path": "/opt/conda"
         },
         "params": {
             "model_name": "test-model",
@@ -106,7 +106,7 @@ def test_heartbeat_python_env_applied_to_slurm_script(tmp_path):
         partition="debug",
         python_env=PythonEnv(
             conda="swebench",
-            conda_path="/mnt/huawei/users/lfu/software/conda"
+            conda_path="/opt/conda"
         )
     )
 
@@ -158,7 +158,7 @@ def test_heartbeat_python_env_applied_to_slurm_script(tmp_path):
     print(script_content[:500])
 
     # CRITICAL: Script must have flex-swe activation, NOT swebench
-    assert ". /mnt/huawei/users/lfu/software/conda/bin/activate flex-swe" in script_content, \
+    assert ". /opt/conda/bin/activate flex-swe" in script_content, \
         "BUG: Task-level python_env (flex-swe) not in generated script!"
 
     # Check that swebench is NOT in the activation command (it's OK in comments)

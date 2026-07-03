@@ -588,7 +588,7 @@ class TestInlineLlmConfig:
         spec = task.prepare(_make_params(
             llm_config={
                 "model": "anthropic/claude-opus-4-6-thinking-hz",
-                "base_url": "http://10.200.95.16:30300",
+                "base_url": "http://vllm-server.internal:8000",
                 "api_key": "sk-xxx",
                 "litellm_extra_body": {
                     "thinking": {"type": "adaptive", "display": "summarized"},
@@ -1043,13 +1043,13 @@ class TestJobIdsPatternExpansion:
         """job_ids with mixed ranges and lists."""
         task = SWEBenchAgenticTask()
         specs = task.prepare_many(_make_params(
-            job_ids="172.16.1.[157-159,161-163]",
+            job_ids="10.0.0.[101-103,111-113]",
             array="000-005"
         ))
         assert len(specs) == 6
         expected_ids = [
-            "172.16.1.157", "172.16.1.158", "172.16.1.159",
-            "172.16.1.161", "172.16.1.162", "172.16.1.163"
+            "10.0.0.101", "10.0.0.102", "10.0.0.103",
+            "10.0.0.111", "10.0.0.112", "10.0.0.113"
         ]
         for i, spec in enumerate(specs):
             assert spec.env["JOB_ID"] == expected_ids[i]
