@@ -77,18 +77,20 @@ def find_configs(target: str, config_dirs: list[Path] | None = None) -> list[Pat
     return found
 
 
-def load_merged_config(
+def load_merged_omegaconf(
     target: str,
     overrides: list[str] | None = None,
     config_dirs: list[Path] | None = None,
-) -> dict:
+):
     """Load config files for *target*, deep-merge via OmegaConf, apply overrides.
 
-    Returns the resolved config as a plain dict (not model-validated).
+    Returns the merged ``DictConfig`` without resolving interpolations. Use
+    this when you need to preserve ``${...}`` references for later resolution.
     """
     from omegaconf import OmegaConf
     import devrun.keystore  # noqa: F401  — registers ${key:…} resolver
     import devrun.presets  # noqa: F401  — registers ${preset:…} resolver
+    import devrun.jobref  # noqa: F401  — registers ${jobs:…} resolver
 
     config_paths = find_configs(target, config_dirs)
     logger.debug("Config merge chain: %s", [str(p) for p in config_paths])
@@ -100,7 +102,42 @@ def load_merged_config(
     if overrides:
         merged_cfg = OmegaConf.merge(merged_cfg, OmegaConf.from_dotlist(overrides))
 
+    return merged_cfg
+
+
+def load_merged_config(
+    target: str,
+    overrides: list[str] | None = None,
+    config_dirs: list[Path] | None = None,
+) -> dict:
+    """Load config files for *target*, deep-merge via OmegaConf, apply overrides.
+
+    Returns the resolved config as a plain dict (not model-validated).
+    """
+    from omegaconf import OmegaConf
+
+    merged_cfg = load_merged_omegaconf(target, overrides, config_dirs)
     return OmegaConf.to_container(merged_cfg, resolve=True)
+
+
+def _warn_if_no_heartbeat() -> None:
+    """Log a one-line warning when the heartbeat service is not active.
+
+    The producer path enqueues jobs in ``QUEUED`` state; without a running
+    heartbeat they will sit there indefinitely. Best-effort only — never
+    raises (a missing service module or unsupported platform must not block
+    job enqueue).
+    """
+    try:
+        from devrun.services import get_service
+
+        if not get_service().is_active():
+            logger.warning(
+                "Heartbeat service is not active. Jobs queued but will not "
+                "promote until 'devrun heartbeat start' runs."
+            )
+    except Exception:
+        logger.debug("Heartbeat status check skipped", exc_info=True)
 
 
 class TaskRunner:
@@ -130,8 +167,34 @@ class TaskRunner:
         """
         return find_configs(target, self._config_dirs)
 
-    def run(self, target: str, overrides: list[str] | None = None, dry_run: bool = False) -> list[str]:
-        """Parse a task YAML, apply overrides, expand sweeps, submit all jobs. Returns list of job_ids."""
+    def run(
+        self,
+        target: str,
+        overrides: list[str] | None = None,
+        dry_run: bool = False,
+        *,
+        after: list[str] | None = None,
+        allow_failure_from: set[str] | None = None,
+    ) -> list[str]:
+        """Parse a task YAML, apply overrides, expand sweeps, enqueue all jobs. Returns list of job_ids.
+
+        ``after`` is a list of parent job IDs the new job depends on; the
+        heartbeat will not promote it until each parent reaches a terminal
+        state. ``allow_failure_from`` is the subset of ``after`` whose failure
+        should be tolerated (mapped to ``allow_failure=1`` on the edge).
+        """
+        after = list(after or [])
+        allow_failure_from = set(allow_failure_from or set())
+        if after:
+            for parent_id in after:
+                if self._db.get(parent_id) is None:
+                    raise ValueError(f"--after references unknown job id: {parent_id}")
+            unknown_lenient = allow_failure_from - set(after)
+            if unknown_lenient:
+                raise ValueError(
+                    "--allow-failure-from ids must also appear in --after: "
+                    f"{sorted(unknown_lenient)}"
+                )
         cfg = self._load_config(target, overrides)
         param_combos = self._expand_sweep(cfg)
         job_ids: list[str] = []
@@ -141,6 +204,10 @@ class TaskRunner:
                 task_cls = get_task_class(cfg.task)
                 task = task_cls()
                 specs: list[TaskSpec] = task.prepare_many(params)
+
+                # Resolve executor to get python_env setup
+                executor = resolve_executor(cfg.executor, self.executor_configs)
+
                 for i, spec in enumerate(specs):
                     label = f"spec {i + 1}/{len(specs)}" if len(specs) > 1 else "spec"
                     header = (
@@ -153,47 +220,50 @@ class TaskRunner:
                         lines.append(f"# resources: {spec.resources}")
                     if spec.env:
                         lines.append(f"# env: {spec.env}")
+
+                    # Show python_env setup (only for real executors, not mocks)
+                    task_python_env = cfg.python_env
+                    executor_env = getattr(executor, '_python_env', None)
+
+                    # Check if we have real PythonEnv objects (not mocks)
+                    from devrun.models import PythonEnv
+                    if isinstance(executor_env, PythonEnv) or isinstance(task_python_env, PythonEnv) or (task_python_env is None and executor_env is None):
+                        if task_python_env or executor_env:
+                            from devrun.executors.base import BaseExecutor
+                            merged_env = BaseExecutor._resolve_python_env(executor_env, task_python_env)
+                            if merged_env:
+                                setup_lines = BaseExecutor._env_to_shell_lines(merged_env)
+                                if setup_lines:
+                                    lines.append(f"# python_env:")
+                                    for setup_line in setup_lines:
+                                        lines.append(f"#   {setup_line}")
+
                     lines.append("")
                     lines.append(spec.command)
                     print("\n".join(lines))
             else:
-                job_ids.extend(self._submit_single(cfg.task, cfg.executor, params, python_env=cfg.python_env))
+                job_ids.extend(
+                    self._submit_single(
+                        cfg.task, cfg.executor, params,
+                        python_env=cfg.python_env,
+                        after=after,
+                        allow_failure_from=allow_failure_from,
+                    )
+                )
 
         return job_ids
 
     def status(self, job_id: str) -> dict[str, Any]:
-        """Return live status for a job, refreshing from the executor if needed."""
+        """Return the job's DB record as a JSON-serialisable dict.
+
+        PR3: this is a pure DB read. The heartbeat is the only writer of
+        ``status``; clients reading via ``devrun status`` see whatever the
+        last completed tick wrote, never a live executor ping.
+        """
         record = self._db.get(job_id)
         if not record:
             return {"error": f"Job {job_id} not found"}
-
-        # If still active (or unknown), query executor for live status
-        if record.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING, JobStatus.UNKNOWN):
-            try:
-                executor = resolve_executor(record.executor, self.executor_configs)
-                remote_id = record.remote_job_id or job_id
-                live_status = executor.status(remote_id)
-                mapped = self._map_status(live_status)
-                if mapped != record.status:
-                    completed_at = datetime.now(timezone.utc) if mapped in (JobStatus.COMPLETED, JobStatus.FAILED) else None
-                    self._db.update_status(job_id, mapped, completed_at=completed_at)
-                    record = self._db.get(job_id)
-            except Exception as exc:
-                logger.warning("Could not refresh status for %s: %s", job_id, exc)
-
-        result = record.model_dump(mode="json") if record else {}
-
-        # Fetch live progress info (e.g. array task counts) — best-effort
-        try:
-            executor = resolve_executor(record.executor, self.executor_configs)
-            remote_id = record.remote_job_id or job_id
-            progress = executor.progress(remote_id)
-            if progress:
-                result["progress"] = progress
-        except Exception as exc:
-            logger.warning("Could not fetch progress for %s: %s", job_id, exc)
-
-        return result
+        return record.model_dump(mode="json")
 
     def logs(self, job_id: str) -> str:
         """Retrieve logs for a job."""
@@ -209,15 +279,9 @@ class TaskRunner:
             return f"Error fetching logs: {exc}"
 
     def history(self, limit: int | None = 50) -> list[dict[str, Any]]:
-        """Return recent job records, refreshing active ones first."""
+        """Return recent job records as JSON-serialisable dicts (pure DB read)."""
         records = self._db.list_all(limit)
-        results = []
-        for r in records:
-            if r.status in (JobStatus.PENDING, JobStatus.SUBMITTED, JobStatus.RUNNING, JobStatus.UNKNOWN):
-                results.append(self.status(r.job_id))
-            else:
-                results.append(r.model_dump(mode="json"))
-        return results
+        return [r.model_dump(mode="json") for r in records]
 
     def rerun(self, job_id: str) -> list[str]:
         """Re-submit a previous job with the same parameters."""
@@ -289,35 +353,52 @@ class TaskRunner:
         return imported, record.task_name, record.job_id
 
     def cancel(self, job_id: str) -> None:
-        """Cancel a running job."""
-        record = self._db.get(job_id)
-        if not record:
-            raise ValueError(f"Job {job_id} not found")
+        """Producer-side cancel: write the state transition; the heartbeat reaps.
 
-        # Forcefully update the job status from the executor before deciding
-        self.status(job_id)
-        record = self._db.get(job_id)
-
-        # Do not cancel if it's already in a terminal state
-        if record.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-            logger.info("Job %s is already %s, skipping cancellation.", job_id, record.status)
-            raise ValueError(f"Job {job_id} is already {record.status}.")
-
-        try:
-            executor = resolve_executor(record.executor, self.executor_configs)
-            remote_id = record.remote_job_id or job_id
-            executor.cancel(remote_id)
-            self._db.update_status(job_id, JobStatus.CANCELLED, completed_at=datetime.now(timezone.utc))
-            logger.info("Job %s cancelled successfully.", job_id)
-        except Exception as exc:
-            logger.error("Failed to cancel job %s: %s", job_id, exc)
-            raise
+        Delegates to :meth:`JobStore.request_cancel` which handles QUEUED
+        (immediate CANCELLED) vs SUBMITTED/RUNNING (CANCELING — the heartbeat's
+        poll phase calls ``executor.cancel`` and finalises on success).
+        Terminal states raise ``ValueError``.
+        """
+        new_status = self._db.request_cancel(job_id)
+        logger.info("Cancel requested for job %s: now %s", job_id, new_status.value)
 
     # ---- internal --------------------------------------------------------
 
     def _load_config(self, target: str, overrides: list[str] | None = None) -> TaskConfig:
         raw = load_merged_config(target, overrides, self._config_dirs)
         return TaskConfig(**raw)
+
+    @staticmethod
+    def _resolve_relative_paths(params: dict[str, Any]) -> dict[str, Any]:
+        """Resolve relative paths in params to absolute paths based on cwd.
+
+        This ensures that when jobs are executed by the heartbeat daemon from
+        a different working directory, paths still resolve correctly.
+
+        Also sets working_dir to cwd if not explicitly provided, so jobs
+        remember where they were submitted from.
+        """
+        from pathlib import Path
+        import os
+
+        # Path keys that should be resolved to absolute paths
+        path_keys = {"output_dir", "working_dir", "logs_dir"}
+
+        resolved = params.copy()
+
+        # Default working_dir to current directory if not set
+        if "working_dir" not in resolved or not resolved["working_dir"]:
+            resolved["working_dir"] = str(Path.cwd())
+
+        for key in path_keys:
+            value = resolved.get(key)
+            if value and isinstance(value, str):
+                path = Path(value)
+                if not path.is_absolute():
+                    resolved[key] = str(Path.cwd() / path)
+
+        return resolved
 
     @staticmethod
     def _expand_sweep(cfg: TaskConfig) -> list[dict[str, Any]]:
@@ -337,66 +418,113 @@ class TaskRunner:
         logger.info("Sweep expanded to %d combinations", len(combos))
         return combos
 
-    def _submit_single(self, task_name: str, executor_name: str, params: dict[str, Any], *, python_env: PythonEnv | None = None) -> list[str]:
-        """Prepare and submit one or more jobs (multi-shard aware).
+    def _submit_single(
+        self,
+        task_name: str,
+        executor_name: str,
+        params: dict[str, Any],
+        *,
+        python_env: PythonEnv | None = None,
+        after: list[str] | None = None,
+        allow_failure_from: set[str] | None = None,
+    ) -> list[str]:
+        """Enqueue one or more jobs in QUEUED state (heartbeat does the actual submit).
 
         Returns a list of job IDs — one per :class:`TaskSpec` returned by
-        the task's ``prepare_many`` method.
+        the task's ``prepare_many`` method. Sweeps therefore produce one
+        QUEUED row per shard. Each new job receives one ``job_dependencies``
+        edge per id in ``after``; ids in ``allow_failure_from`` get
+        ``allow_failure=1`` on their edge.
         """
-        # 1. Resolve task plugin and expand shards
         task_cls = get_task_class(task_name)
         task = task_cls()
+
+        # Resolve relative paths to absolute before enqueuing
+        params = self._resolve_relative_paths(params)
+
         specs: list[TaskSpec] = task.prepare_many(params)
 
+        after = list(after or [])
+        allow_failure_from = set(allow_failure_from or set())
+
+        # Extract instances/job_ids for per-spec param customization
+        job_ids_list = params.get("job_ids")
+        instances = params.get("instances")
+        if job_ids_list:
+            from devrun.utils.pattern_expansion import expand_patterns
+            expanded = expand_patterns(str(job_ids_list))
+            instance_list = [{"JOB_ID": jid.strip()} for jid in expanded]
+        elif instances:
+            instance_list = instances
+        else:
+            instance_list = [None] * len(specs)
+
         job_ids: list[str] = []
-        for task_spec in specs:
-            # 2. Propagate task-level python_env into metadata for executors to consume
+        for spec_idx, task_spec in enumerate(specs):
             if python_env is not None:
                 task_spec.metadata["python_env"] = python_env
 
-            # 3. Record in DB
-            job_id = self._db.insert(task_name, executor_name, params)
+            # Build per-job params: include instance-specific data so heartbeat
+            # can reproduce the same spec
+            job_params = dict(params)
+            if instance_list[spec_idx] is not None:
+                # Replace multi-instance config with single-instance to ensure
+                # prepare_many returns exactly this one spec
+                job_params["instances"] = [instance_list[spec_idx]]
+                job_params.pop("job_ids", None)  # Remove shorthand
 
-            # 4. Resolve executor and submit
-            try:
-                executor = resolve_executor(executor_name, self.executor_configs)
-                self._db.update_status(job_id, JobStatus.SUBMITTED)
-                remote_job_id = executor.submit_with_retry(task_spec, retries=3, retry_delay=5.0)
-                log_path = task_spec.metadata.get("log_path")
-                self._db.update_status(job_id, JobStatus.RUNNING, remote_job_id=remote_job_id, log_path=log_path)
-                logger.info(
-                    "Job %s submitted → executor=%s, remote_id=%s",
-                    job_id, executor_name, remote_job_id,
+                # Merge instance env vars into job_params["env"] so heartbeat
+                # can expand {JOB_ID} and other placeholders in the template
+                job_params.setdefault("env", {}).update(instance_list[spec_idx])
+
+                # Extract sharded array range from TaskSpec if present
+                # prepare_many() splits the array range across instances, but the
+                # sharded value only exists in the TaskSpec's extra_sbatch directives.
+                # We need to capture it back into job_params so heartbeat can reproduce
+                # the same sharded array when it calls prepare() again.
+                extra_sbatch = task_spec.resources.get("extra_sbatch", [])
+                for directive in extra_sbatch:
+                    if directive.startswith("--array "):
+                        # Extract "000-124%16" from "--array 000-124%16"
+                        array_value = directive.split(" ", 1)[1]
+                        # Remove concurrency limit suffix to get just the range
+                        if "%" in array_value:
+                            array_range, concurrency = array_value.split("%", 1)
+                            job_params["array"] = array_range
+                            # concurrency_limit is already in params
+                        else:
+                            job_params["array"] = array_value
+                        break
+            # Store python_env in params for heartbeat to use
+            if python_env is not None:
+                job_params["_python_env"] = python_env.model_dump() if hasattr(python_env, "model_dump") else python_env
+
+            params_template = yaml.safe_dump(job_params, sort_keys=False)
+
+            job_id = self._db.enqueue(
+                task_name=task_name,
+                executor=executor_name,
+                params_template=params_template,
+                parameters=job_params,
+            )
+            for parent_id in after:
+                self._db.insert_dependency(
+                    child_job_id=job_id,
+                    parent_job_id=parent_id,
+                    allow_failure=(parent_id in allow_failure_from),
                 )
-            except Exception as exc:
-                self._db.update_status(job_id, JobStatus.FAILED, completed_at=datetime.now(timezone.utc))
-                logger.error("Job %s failed to submit: %s", job_id, exc)
-                raise
-
+            logger.info(
+                "Job %s queued (task=%s, executor=%s, parents=%d)",
+                job_id, task_name, executor_name, len(after),
+            )
             job_ids.append(job_id)
 
+        _warn_if_no_heartbeat()
         return job_ids
 
     @staticmethod
     def _map_status(raw: str) -> JobStatus:
         """Map executor-reported status strings to :class:`JobStatus`."""
-        mapping = {
-            "running": JobStatus.RUNNING,
-            "pending": JobStatus.PENDING,
-            "completed": JobStatus.COMPLETED,
-            "done": JobStatus.COMPLETED,
-            "failed": JobStatus.FAILED,
-            "cancelled": JobStatus.CANCELLED,
-            "timeout": JobStatus.FAILED,
-            "completing": JobStatus.RUNNING,
-            "node_fail": JobStatus.FAILED,
-            "out_of_memory": JobStatus.FAILED,
-            "preempted": JobStatus.FAILED,
-            "boot_fail": JobStatus.FAILED,
-            "deadline": JobStatus.FAILED,
-            "stopped": JobStatus.FAILED,
-            "suspended": JobStatus.RUNNING,
-            "requeued": JobStatus.PENDING,
-            "resizing": JobStatus.RUNNING,
-        }
-        return mapping.get(raw.lower(), JobStatus.UNKNOWN)
+        from devrun.heartbeat import map_status
+
+        return map_status(raw)

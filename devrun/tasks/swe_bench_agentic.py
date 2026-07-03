@@ -12,6 +12,7 @@ from typing import Any
 from devrun.models import TaskSpec
 from devrun.registry import register_task
 from devrun.tasks.base import BaseTask
+from devrun.utils.pattern_expansion import expand_patterns
 from devrun.utils.swebench import derive_ds_dir
 from devrun.utils.templates import render_template
 
@@ -107,6 +108,18 @@ class SWEBenchAgenticTask(BaseTask):
         """Override in subclasses to provide extra default flags."""
         return params.get("extra_flags", ["--use-legacy-tools", "--bind-dev-sdk"])
 
+    def _get_script_args(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Override in subclasses to provide custom script arguments.
+
+        Returns a dict mapping argument names to values:
+          {"arg_name": "value"}  → --arg-name value
+          {"flag": True}         → --flag
+          {"flag": False}        → (omitted)
+
+        Argument names with underscores are converted to hyphens automatically.
+        """
+        return params.get("script_args", {})
+
     def prepare(self, params: dict[str, Any]) -> TaskSpec:
         model_name = params.get("model_name")
         run_name = params.get("run_name")
@@ -150,6 +163,7 @@ class SWEBenchAgenticTask(BaseTask):
             )
 
         # --- resolve output_dir and run_name ---
+        base_dir = params.get("base_dir")  # Optional base directory for all paths
         output_dir = params.get("output_dir")
         if not output_dir:
             logs_dir = params.get("logs_dir", "logs")
@@ -157,6 +171,10 @@ class SWEBenchAgenticTask(BaseTask):
                 import datetime
                 run_name = f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
             output_dir = f"{logs_dir}/{run_name}"
+
+        # If base_dir is specified and output_dir is relative, prepend base_dir
+        if base_dir and not Path(output_dir).is_absolute():
+            output_dir = f"{base_dir}/{output_dir}"
 
         dataset = params.get("dataset")
         if not dataset:
@@ -182,13 +200,18 @@ class SWEBenchAgenticTask(BaseTask):
 
         script = self._get_run_script(params)
         flags = self._get_default_flags(params)
+        script_args = self._get_script_args(params)
         env_commands = params.get("env_commands", [])
         env_vars = params.get("env", {})
         git_safe_dirs = params.get("git_safe_dirs", [])
 
+        # Allow custom template override
+        template_name = params.get("template", "swe_bench_agentic.sh.j2")
+
         # Render the bash command via Jinja2 template
         command = render_template(
-            "swe_bench_agentic.sh.j2",
+            template_name,
+            base_dir=base_dir,
             env_commands=env_commands,
             git_safe_dirs=git_safe_dirs,
             dataset=dataset,
@@ -207,6 +230,7 @@ class SWEBenchAgenticTask(BaseTask):
             select_dir=select_dir,
             workspace=workspace,
             extra_flags=flags,
+            script_args=script_args,
             env_vars=env_vars,
         )
 
@@ -215,6 +239,10 @@ class SWEBenchAgenticTask(BaseTask):
         for k in ["nodes", "gpus_per_node", "gpus", "walltime", "partition", "mem", "cpus_per_task", "job_name"]:
             if k in params:
                 resources[k] = params[k]
+
+        # Add hold flag if requested
+        if params.get("hold", False):
+            resources["hold"] = True
 
         array = params.get("array")
         concurrency_limit = params.get("concurrency_limit")
@@ -262,7 +290,8 @@ class SWEBenchAgenticTask(BaseTask):
         """
         job_ids = params.get("job_ids")
         if job_ids:
-            instances = [{"JOB_ID": jid.strip()} for jid in str(job_ids).split(",")]
+            expanded = expand_patterns(str(job_ids))
+            instances = [{"JOB_ID": jid.strip()} for jid in expanded]
         else:
             instances = params.get("instances")
         if not instances:

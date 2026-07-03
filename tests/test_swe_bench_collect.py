@@ -202,7 +202,11 @@ class TestSWEBenchCollectTask:
     # ---- import_from_job ----------------------------------------------
 
     def test_import_from_job_explicit_output_dir(self):
-        """When the agentic job already had output_dir, it's forwarded verbatim."""
+        """When the agentic job already had output_dir, it's forwarded verbatim.
+
+        working_dir is set to output_dir so the collect job runs in the same
+        location as the agentic job's outputs.
+        """
         imported = SWEBenchCollectTask.import_from_job(
             "swe_bench_agentic",
             {
@@ -210,14 +214,14 @@ class TestSWEBenchCollectTask:
                 "dataset": "/data/SWE",
                 "split": "test",
                 "model_name": "gpt-x",
-                "working_dir": "/proj",
+                "working_dir": "/proj",  # This is ignored
             },
         )
         assert imported == {
             "output_dir": "logs/run42",
             "dataset": "/data/SWE",
             "split": "test",
-            "working_dir": "/proj",
+            "working_dir": "logs/run42",  # Set to output_dir, not imported from source
             "model_name_or_path": "gpt-x",
         }
 

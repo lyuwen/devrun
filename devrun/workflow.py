@@ -2,22 +2,18 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
-import os
 import re
-import subprocess
-import sys
-import tempfile
-import time
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from devrun.db.jobs import JobStore
+import yaml
+
+from devrun.db.jobs import JobStore, WorkflowStageRow
 from devrun.models import JobStatus, WorkflowConfig, WorkflowStage
 from devrun.registry import get_task_class
-from devrun.router import resolve_executor
 
 logger = logging.getLogger("devrun.workflow")
 
@@ -47,22 +43,37 @@ class WorkflowRunner:
         dry_run: bool = False,
         start_after: str | None = None,
         skipped_params: dict[str, dict[str, Any]] | None = None,
+        from_job: str | None = None,
     ) -> str:
-        """Execute (or dry-run) a workflow.
+        """Enqueue a workflow's stages atomically and return the workflow_id.
+
+        PR3 producer-flip: this method **no longer drives a polling loop**.
+        It writes the workflow row, one jobs row per non-skipped stage, one
+        workflow_jobs row per stage, and all dependency edges in a single
+        ``JobStore.enqueue_workflow`` transaction, then exits. The heartbeat
+        scheduler is responsible for promoting QUEUED jobs to SUBMITTED.
 
         Args:
             config: Parsed workflow configuration.
-            dry_run: Preview execution plan without submitting.
+            dry_run: Preview execution plan without enqueueing.
             start_after: Skip this stage and its transitive dependencies.
             skipped_params: Pre-resolved params for stages skipped via
                 ``--from-job``.  Keys are stage names, values are the
                 param dicts from the corresponding job records.
+            from_job: Job ID from ``--from-job``, used to populate
+                ``source_job_id`` in workflow_jobs rows for skipped stages.
 
         Returns the workflow_id for real runs, or a plan string for dry_run.
         """
         stages_by_name = {s.name: s for s in config.stages}
 
-        # Validate start_after early (applies to both dry-run and real runs)
+        # Validate start_after requires from_job (defense-in-depth)
+        if start_after and not from_job:
+            raise ValueError(
+                "--start-after requires --from-job because skipped stages need source "
+                "job params to resolve downstream cross-stage references (${stages:...})"
+            )
+
         skip_set: set[str] = set()
         if start_after:
             skip_set = self._compute_skip_set(start_after, stages_by_name)
@@ -73,270 +84,159 @@ class WorkflowRunner:
                 skipped_params=skipped_params,
             )
 
-        # Fail fast on unfilled <REQUIRED:…> placeholders
         self._validate_no_placeholders(config)
 
-        # Initialise per-stage state
-        stages_state: dict[str, dict[str, Any]] = {}
-        for stage in config.stages:
-            stages_state[stage.name] = {"status": "pending", "remote_job_id": None, "db_job_id": None}
+        deadline_at = datetime.now(timezone.utc) + timedelta(seconds=config.timeout)
+        stage_rows, edges = self._build_stage_plan(
+            config, stages_by_name, skip_set=skip_set, source_job_id=from_job,
+        )
 
-        # Pre-mark skipped stages and populate their resolved_params
-        if skip_set:
-            for name in skip_set:
-                state: dict[str, Any] = {
-                    "status": "skipped_by_user",
-                    "remote_job_id": None,
-                    "db_job_id": None,
-                }
-                if skipped_params and name in skipped_params:
-                    state["resolved_params"] = skipped_params[name]
-                stages_state[name] = state
-                logger.info("Stage %s skipped (--start-after %s)", name, start_after)
-
-        wf_id = self._db.insert_workflow(config.workflow, stages_state)
-        self._db.update_workflow(wf_id, status="running")
-        logger.info("Workflow %s started: %s", wf_id, config.workflow)
-
-        return self._heartbeat_loop(wf_id, config, stages_state)
-
-    def run_detached(
-        self,
-        config: WorkflowConfig,
-        start_after: str | None = None,
-        skipped_params: dict[str, dict[str, Any]] | None = None,
-    ) -> str:
-        """Start a workflow in a background process and return immediately.
-
-        Returns the workflow_id.  The background process runs the heartbeat
-        loop and updates the DB.  Use ``status()`` / ``logs()`` to monitor.
-        """
-        stages_by_name = {s.name: s for s in config.stages}
-
-        # Validate early so the user gets errors before we fork
-        self._validate_no_placeholders(config)
-        skip_set: set[str] = set()
-        if start_after:
-            skip_set = self._compute_skip_set(start_after, stages_by_name)
-
-        # Create workflow record so the caller can query it immediately
-        stages_state: dict[str, dict[str, Any]] = {}
-        for stage in config.stages:
-            stages_state[stage.name] = {"status": "pending", "remote_job_id": None, "db_job_id": None}
-        if skip_set:
-            for name in skip_set:
-                ss: dict[str, Any] = {
-                    "status": "skipped_by_user",
-                    "remote_job_id": None,
-                    "db_job_id": None,
-                }
-                if skipped_params and name in skipped_params:
-                    ss["resolved_params"] = skipped_params[name]
-                stages_state[name] = ss
-
-        wf_id = self._db.insert_workflow(config.workflow, stages_state)
-        self._db.update_workflow(wf_id, status="pending")
-
-        # Serialise state for the child process.
-        # skip_set is already applied to stages_state above, so the child
-        # process does not need start_after — it just drives the heartbeat.
-        state: dict[str, Any] = {
-            "config": config.model_dump(mode="json"),
-            "workflow_id": wf_id,
-            "db_path": str(self._db._db_path),
-        }
-        if self._executors_path is not None:
-            state["executors_path"] = str(self._executors_path)
-        fd, state_path = tempfile.mkstemp(prefix="devrun_wf_", suffix=".json")
-        with os.fdopen(fd, "w") as fh:
-            json.dump(state, fh)
-
-        # Ensure log directory exists
-        log_dir = Path.home() / ".devrun" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f"workflow_{wf_id}.log"
-
-        with open(log_file, "w") as log_fh:
-            subprocess.Popen(
-                [sys.executable, "-m", "devrun.workflow", "--state-file", state_path],
-                start_new_session=True,
-                stdout=log_fh,
-                stderr=subprocess.STDOUT,
-                close_fds=True,
-            )
-
+        wf_id = self._db.enqueue_workflow(
+            workflow_name=config.workflow,
+            deadline_at=deadline_at,
+            stage_rows=stage_rows,
+            edges=edges,
+        )
         logger.info(
-            "Workflow %s detached (PID forked). Log: %s", wf_id, log_file,
+            "Workflow %s enqueued: %s (stages=%d, edges=%d)",
+            wf_id, config.workflow, len(stage_rows), len(edges),
         )
         return wf_id
 
-    def _run_existing(
+    def _build_stage_plan(
         self,
-        wf_id: str,
         config: WorkflowConfig,
-    ) -> str:
-        """Drive the heartbeat loop on an already-created workflow record.
+        stages_by_name: dict[str, WorkflowStage],
+        *,
+        skip_set: set[str],
+        source_job_id: str | None = None,
+    ) -> tuple[list[WorkflowStageRow], list[tuple[str, str, bool]]]:
+        """Build the (stage_rows, edges) tuple handed to ``enqueue_workflow``.
 
-        Used by the detached background process.  The workflow record and
-        initial stages_state already exist in the DB (created by
-        ``run_detached``).  The skip_set has already been applied to
-        stages_state before serialisation, so no ``start_after`` is needed here.
+        Each non-skipped stage gets a fresh ``job_id`` (uuid hex prefix);
+        each ``depends_on`` reference becomes one edge (child=this stage's
+        job_id, parent=referenced stage's job_id). Skipped stages get
+        ``job_id=None`` and ``source_job_id`` from the ``--from-job`` parameter.
         """
-        record = self._db.get_workflow(wf_id)
-        if not record:
-            raise ValueError(f"Workflow {wf_id} not found in DB")
-        stages_state: dict[str, dict[str, Any]] = json.loads(record["stages_state"])
+        stage_rows: list[WorkflowStageRow] = []
 
-        self._db.update_workflow(wf_id, status="running")
-        logger.info("Workflow %s resumed (detached): %s", wf_id, config.workflow)
+        # First pass: allocate job_ids for all non-skipped stages
+        job_ids: dict[str, str | None] = {}
+        for stage in config.stages:
+            if stage.name in skip_set:
+                job_ids[stage.name] = None
+            else:
+                job_ids[stage.name] = uuid.uuid4().hex[:12]
 
-        return self._heartbeat_loop(wf_id, config, stages_state)
+        # Build stage_map for rewriting ${stages:...} references
+        if source_job_id is not None:
+            # For --from-job workflows, map to source job's stages
+            stage_map = self._build_source_stage_map(source_job_id)
+        else:
+            # For normal workflows, map to current workflow's job_ids (non-None only)
+            stage_map = {name: jid for name, jid in job_ids.items() if jid is not None}
 
-    def _heartbeat_loop(
-        self,
-        wf_id: str,
-        config: WorkflowConfig,
-        stages_state: dict[str, dict[str, Any]],
-    ) -> str:
-        """Core heartbeat polling loop shared by ``run()`` and ``_run_existing()``."""
-        start_time = time.monotonic()
-
-        try:
-            while True:
-                elapsed = time.monotonic() - start_time
-                if elapsed > config.timeout:
-                    logger.warning("Workflow %s timed out after %.0fs", wf_id, elapsed)
-                    self._db.update_workflow(
-                        wf_id,
-                        status="timed_out",
-                        stages_state=stages_state,
-                        completed_at=datetime.now(timezone.utc),
+        # Second pass: build stage rows with rewritten params_template
+        for ordinal, stage in enumerate(config.stages):
+            if stage.name in skip_set:
+                stage_rows.append(
+                    WorkflowStageRow(
+                        stage_name=stage.name,
+                        ordinal=ordinal,
+                        job_id=None,
+                        source_job_id=source_job_id,
+                        task_name=None,
+                        executor=None,
+                        params_template=None,
+                        parameters=None,
                     )
-                    return wf_id
+                )
+                continue
 
-                all_done = True
-                any_failed = False
+            job_id = job_ids[stage.name]
+            raw_template = yaml.safe_dump(stage.params or {}, sort_keys=False)
+            # Always rewrite ${stages:...} references to ${jobs:...}
+            params_template = self._rewrite_stage_references(raw_template, stage_map)
 
-                for stage in config.stages:
-                    state = stages_state[stage.name]
-
-                    if state["status"] in ("completed", "skipped", "skipped_by_user"):
-                        continue
-                    if state["status"] in ("failed", "cancelled"):
-                        any_failed = True
-                        continue
-
-                    all_done = False
-
-                    if state["status"] == "pending":
-                        deps = stage.depends_on or []
-                        if isinstance(deps, str):
-                            deps = [deps]
-                        deps_met = all(
-                            stages_state[d]["status"] in self._SATISFIED_STATUSES
-                            for d in deps
-                        )
-                        if not deps_met:
-                            if any(
-                                stages_state[d]["status"] == "failed" for d in deps
-                            ):
-                                state["status"] = "skipped"
-                                logger.info(
-                                    "Stage %s skipped: dependency failed", stage.name
-                                )
-                            continue
-
-                        try:
-                            db_job_id, remote_id, resolved_params = self._submit_stage(
-                                stage.name,
-                                stage,
-                                stages_state,
-                            )
-                            state["status"] = "submitted"
-                            state["remote_job_id"] = remote_id
-                            state["db_job_id"] = db_job_id
-                            state["executor"] = stage.executor
-                            state["resolved_params"] = resolved_params
-                            logger.info(
-                                "Stage %s submitted: remote_job_id=%s, db_job_id=%s",
-                                stage.name, remote_id, db_job_id,
-                            )
-                        except Exception:
-                            logger.exception("Stage %s failed to submit", stage.name)
-                            state["status"] = "failed"
-                            any_failed = True
-
-                    elif state["status"] in ("submitted", "running"):
-                        remote_id = state["remote_job_id"]
-                        poll_status = self._poll_job_status(remote_id, stage.executor)
-
-                        if poll_status == "completed":
-                            state["status"] = "completed"
-                            logger.info("Stage %s completed", stage.name)
-                            db_jid = state.get("db_job_id")
-                            if db_jid:
-                                self._db.update_status(
-                                    db_jid, JobStatus.COMPLETED,
-                                    completed_at=datetime.now(timezone.utc),
-                                )
-                        elif poll_status == "failed":
-                            state["status"] = "failed"
-                            any_failed = True
-                            logger.error("Stage %s failed", stage.name)
-                            db_jid = state.get("db_job_id")
-                            if db_jid:
-                                self._db.update_status(
-                                    db_jid, JobStatus.FAILED,
-                                    completed_at=datetime.now(timezone.utc),
-                                )
-                        elif poll_status == "cancelled":
-                            state["status"] = "cancelled"
-                            any_failed = True
-                            logger.warning("Stage %s cancelled", stage.name)
-                            db_jid = state.get("db_job_id")
-                            if db_jid:
-                                self._db.update_status(
-                                    db_jid, JobStatus.CANCELLED,
-                                    completed_at=datetime.now(timezone.utc),
-                                )
-                        elif poll_status == "running":
-                            state["status"] = "running"
-
-                self._db.update_workflow(wf_id, stages_state=stages_state)
-
-                if any_failed:
-                    self._db.update_workflow(
-                        wf_id,
-                        status="failed",
-                        stages_state=stages_state,
-                        completed_at=datetime.now(timezone.utc),
-                    )
-                    logger.error("Workflow %s failed", wf_id)
-                    return wf_id
-
-                if all_done:
-                    self._db.update_workflow(
-                        wf_id,
-                        status="completed",
-                        stages_state=stages_state,
-                        completed_at=datetime.now(timezone.utc),
-                    )
-                    logger.info("Workflow %s completed successfully", wf_id)
-                    return wf_id
-
-                time.sleep(config.heartbeat_interval)
-
-        except Exception:
-            logger.exception("Workflow %s encountered an unexpected error", wf_id)
-            self._db.update_workflow(
-                wf_id,
-                status="failed",
-                stages_state=stages_state,
-                completed_at=datetime.now(timezone.utc),
+            stage_rows.append(
+                WorkflowStageRow(
+                    stage_name=stage.name,
+                    ordinal=ordinal,
+                    job_id=job_id,
+                    source_job_id=None,
+                    task_name=stage.task,
+                    executor=stage.executor,
+                    params_template=params_template,
+                    parameters=dict(stage.params or {}),
+                )
             )
-            return wf_id
 
-    # -- internal helpers ---------------------------------------------------
+        edges: list[tuple[str, str, bool]] = []
+        for stage in config.stages:
+            child_id = job_ids.get(stage.name)
+            if child_id is None:
+                continue
+            parents = stage.depends_on
+            if parents is None:
+                continue
+            if isinstance(parents, str):
+                parents = [parents]
+            for parent_name in parents:
+                parent_id = job_ids.get(parent_name)
+                # If parent is skipped (job_id=None), use source_job_id instead
+                if parent_id is None and parent_name in skip_set and source_job_id is not None:
+                    parent_id = source_job_id
+                if parent_id is None:
+                    continue
+                edges.append((child_id, parent_id, False))
+        return stage_rows, edges
+
+    def _rewrite_stage_references(
+        self, params_template: str, stage_map: dict[str, str]
+    ) -> str:
+        """Rewrite ${stages:stage_name,field} → ${jobs:job_id,field}.
+
+        stage_map: {stage_name: job_id} for all stages in the source workflow.
+        If stage_map contains {"*": job_id}, all stage refs map to that single job.
+        """
+        pattern = r'\$\{stages:([^,}]+),([^}]+)\}'
+
+        def replace(match):
+            stage_name = match.group(1)
+            field = match.group(2)
+            # Check for exact match first, then wildcard
+            if stage_name in stage_map:
+                job_id = stage_map[stage_name]
+                return f"${{jobs:{job_id},{field}}}"
+            elif "*" in stage_map:
+                job_id = stage_map["*"]
+                return f"${{jobs:{job_id},{field}}}"
+            return match.group(0)  # unchanged if stage not found
+
+        return re.sub(pattern, replace, params_template)
+
+    def _build_source_stage_map(self, source_job_id: str) -> dict[str, str]:
+        """Build a map of {stage_name: job_id} from the source job's workflow.
+
+        This is used to rewrite ${stages:...} references when using --from-job.
+        If the source job is standalone (not part of a workflow), all stage
+        references map to the source job itself.
+        """
+        # Check if source job is part of a workflow
+        workflow_jobs = self._db._conn.execute(
+            "SELECT workflow_id FROM workflow_jobs WHERE job_id = ?",
+            (source_job_id,)
+        ).fetchone()
+
+        if workflow_jobs is None:
+            # Source job is standalone - map all stage refs to this job
+            # This allows ${stages:any_name,...} → ${jobs:<source_job_id>,...}
+            return {"*": source_job_id}
+
+        # Source job is part of a workflow - get the full stage map
+        workflow_id = workflow_jobs["workflow_id"]
+        source_stages = self._db.get_workflow_stages(workflow_id)
+        return {s.stage_name: s.job_id for s in source_stages if s.job_id is not None}
 
     def _resolve_stage_params(
         self,
@@ -439,23 +339,30 @@ class WorkflowRunner:
     def _compute_skip_set(
         start_after: str, stages_by_name: dict[str, WorkflowStage]
     ) -> set[str]:
-        """Return the set of stage names to skip: *start_after* plus its transitive deps."""
+        """Return the set of stage names to skip: all stages that come before start_after.
+
+        The named stage and everything after it will run.
+        """
         if start_after not in stages_by_name:
             raise ValueError(
                 f"--start-after stage '{start_after}' does not exist. "
                 f"Available stages: {sorted(stages_by_name)}"
             )
         skip: set[str] = set()
+        # Walk backward from start_after through its dependencies
         queue = [start_after]
+        visited = set()
         while queue:
             name = queue.pop()
-            if name in skip:
+            if name in visited:
                 continue
-            skip.add(name)
+            visited.add(name)
             deps = stages_by_name[name].depends_on or []
             if isinstance(deps, str):
                 deps = [deps]
-            queue.extend(deps)
+            for dep in deps:
+                skip.add(dep)  # Skip the dependency, not the stage itself
+                queue.append(dep)
         return skip
 
     @staticmethod
@@ -484,61 +391,6 @@ class WorkflowRunner:
                 "  devrun workflow run config.yaml params.model_name=mymodel params.dataset=/path/to/data"
             )
             raise ValueError("\n".join(lines))
-
-    def _submit_stage(
-        self,
-        stage_name: str,
-        stage: WorkflowStage,
-        stages_state: dict[str, dict[str, Any]],
-    ) -> tuple[str, str, dict[str, Any]]:
-        """Submit a single stage: resolve params, prepare task, submit to executor.
-
-        Returns (db_job_id, remote_job_id, resolved_params).
-        """
-        resolved_params, auto_keys = self._resolve_stage_params(stage, stages_state)
-        if auto_keys:
-            logger.info(
-                "Stage %s auto-forwarded params: %s",
-                stage_name,
-                sorted(auto_keys),
-            )
-
-        task_cls = get_task_class(stage.task)
-        task = task_cls()
-        task_spec = task.prepare(resolved_params)
-
-        executor = resolve_executor(stage.executor, executors_path=self._executors_path)
-        remote_id = executor.submit(task_spec)
-
-        # Record in jobs table
-        db_job_id = self._db.insert(
-            task_name=stage.task,
-            executor=stage.executor,
-            parameters=resolved_params,
-        )
-        self._db.update_status(
-            db_job_id,
-            JobStatus.SUBMITTED,
-            remote_job_id=remote_id,
-            log_path=task_spec.metadata.get("log_path"),
-        )
-        return db_job_id, remote_id, resolved_params
-
-    def _poll_job_status(self, job_id: str, executor_name: str) -> str:
-        """Check the live status of a submitted job."""
-        executor = resolve_executor(executor_name, executors_path=self._executors_path)
-        raw_status = executor.status(job_id)
-
-        status_lower = raw_status.lower()
-        if status_lower in ("completed", "complete", "done"):
-            return "completed"
-        if status_lower in ("cancelled", "canceled"):
-            return "cancelled"
-        if status_lower in ("failed", "error", "timeout", "out_of_memory"):
-            return "failed"
-        if status_lower in ("running", "pending", "submitted", "configuring"):
-            return "running"
-        return "running"  # treat unknown as still running
 
     def _dry_run(
         self,
@@ -749,79 +601,98 @@ class WorkflowRunner:
         record = self._db.get_workflow(workflow_id)
         if not record:
             raise ValueError(f"Workflow {workflow_id} not found")
-        stages_state = json.loads(record["stages_state"])
-        for name, state in stages_state.items():
-            remote_id = state.get("remote_job_id")
-            if state["status"] in ("submitted", "running") and remote_id:
-                logger.info("Cancelling stage %s (remote_job_id %s)", name, remote_id)
-                executor_name = state.get("executor")
-                if executor_name:
-                    try:
-                        executor = resolve_executor(
-                            executor_name, executors_path=self._executors_path
-                        )
-                        executor.cancel(remote_id)
-                    except Exception:
-                        logger.warning(
-                            "Failed to cancel remote job %s for stage %s",
-                            remote_id,
-                            name,
-                            exc_info=True,
-                        )
-                state["status"] = "cancelled"
+
+        # Read stage jobs from workflow_jobs table
+        stage_rows = self._db.get_workflow_stages(workflow_id)
+        cancelled_count = 0
+
+        for stage_row in stage_rows:
+            job_id = stage_row.job_id
+            if job_id is None:
+                continue
+
+            # Get job record
+            job_record = self._db.get(job_id)
+            if job_record is None:
+                continue
+
+            # Skip terminal jobs
+            status = JobStatus(job_record.status) if isinstance(job_record.status, str) else job_record.status
+            if status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SKIPPED, JobStatus.TIMED_OUT):
+                continue
+
+            # Cancel the job
+            try:
+                self._db.request_cancel(job_id)
+                cancelled_count += 1
+                logger.info("Requested cancel for job %s (stage %s)", job_id, stage_row.stage_name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to cancel job %s for stage %s: %s",
+                    job_id,
+                    stage_row.stage_name,
+                    exc,
+                )
+
+        # Mark workflow as cancelled
         self._db.update_workflow(
             workflow_id,
             status="cancelled",
-            stages_state=stages_state,
+            stages_state={},
             completed_at=datetime.now(timezone.utc),
         )
+        logger.info("Workflow %s cancelled (%d jobs affected)", workflow_id, cancelled_count)
 
     def logs(self, workflow_id: str, stage: str | None = None) -> str:
         """Retrieve logs for a workflow or specific stage.
 
-        For specific stages with executor info, delegates to the executor's
-        ``logs()`` method.  Falls back to a status summary otherwise.
-        For detached workflows, appends the background process log.
+        For skipped stages with source_job_id, fetches logs from the source job.
+        For non-skipped stages, fetches logs from the stage's job.
         """
+        # Verify workflow exists
         record = self._db.get_workflow(workflow_id)
         if not record:
             raise ValueError(f"Workflow {workflow_id} not found")
-        stages_state = json.loads(record["stages_state"])
+
+        # Get stages from workflow_jobs table (producer model)
+        stages = self._db.get_workflow_stages(workflow_id)
 
         if stage:
-            state = stages_state.get(stage)
-            if not state or not state.get("remote_job_id"):
-                return f"No logs available for stage '{stage}'"
-            remote_id = state["remote_job_id"]
-            # Try to delegate to executor for real logs
-            executor_name = state.get("executor")
-            if executor_name:
-                try:
-                    executor = resolve_executor(
-                        executor_name, executors_path=self._executors_path
-                    )
-                    return executor.logs(remote_id)
-                except Exception:
-                    logger.debug(
-                        "Could not fetch executor logs for stage %s, falling back",
-                        stage, exc_info=True,
-                    )
-            return f"Stage {stage}: remote_job_id={remote_id}, status={state['status']}"
+            # Find the requested stage
+            stage_row = next((s for s in stages if s.stage_name == stage), None)
+            if not stage_row:
+                return f"Stage '{stage}' not found in workflow {workflow_id}"
 
+            # Handle skipped stage with source_job_id
+            if stage_row.job_id is None and stage_row.source_job_id:
+                source_job = self._db.get(stage_row.source_job_id)
+                if source_job and source_job.log_path:
+                    log_text = Path(source_job.log_path).read_text() if Path(source_job.log_path).exists() else "(log file not found)"
+                    return f"Stage {stage}: skipped, using logs from source job {stage_row.source_job_id}\n\n{log_text}"
+                return f"Stage {stage}: skipped, source job {stage_row.source_job_id} has no logs"
+
+            # Handle skipped stage without source (shouldn't happen with Task #36 validation)
+            if stage_row.job_id is None:
+                return f"Stage {stage}: skipped, no source job available"
+
+            # Handle non-skipped stage
+            job = self._db.get(stage_row.job_id)
+            if job and job.log_path:
+                log_text = Path(job.log_path).read_text() if Path(job.log_path).exists() else "(log file not found)"
+                return f"Stage {stage}: job {stage_row.job_id}\n\n{log_text}"
+            return f"Stage {stage}: job {stage_row.job_id} has no logs yet"
+
+        # Show all stages summary
         lines = []
-        for name, state in stages_state.items():
-            lines.append(
-                f"{name}: status={state['status']}, remote_job_id={state.get('remote_job_id', 'N/A')}"
-            )
-
-        # Append background process log for detached workflows
-        bg_log = Path.home() / ".devrun" / "logs" / f"workflow_{workflow_id}.log"
-        if bg_log.exists():
-            log_text = bg_log.read_text().strip()
-            if log_text:
-                lines.append("")
-                lines.append(f"--- Background process log ({bg_log}) ---")
-                lines.append(log_text)
+        for s in stages:
+            if s.job_id is None and s.source_job_id:
+                lines.append(f"{s.stage_name}: skipped (source: {s.source_job_id})")
+            elif s.job_id is None:
+                lines.append(f"{s.stage_name}: skipped")
+            else:
+                job = self._db.get(s.job_id)
+                status = job.status if job else "unknown"
+                lines.append(f"{s.stage_name}: {status} (job: {s.job_id})")
 
         return "\n".join(lines)
 
@@ -830,33 +701,3 @@ class WorkflowRunner:
 # Background process entry point (used by run_detached)
 # ---------------------------------------------------------------------------
 
-
-def _run_from_state_file(state_path: str) -> None:
-    """Entry point for ``python -m devrun.workflow --state-file <path>``."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    path = Path(state_path)
-    state = json.loads(path.read_text())
-    # Clean up state file now that we've read it
-    path.unlink(missing_ok=True)
-
-    config = WorkflowConfig(**state["config"])
-    wf_id: str = state["workflow_id"]
-
-    runner = WorkflowRunner(
-        db_path=state.get("db_path"),
-        executors_path=state.get("executors_path"),
-    )
-    runner._run_existing(wf_id, config)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Detached workflow runner")
-    parser.add_argument("--state-file", required=True, help="Path to serialised state JSON")
-    args = parser.parse_args()
-    _run_from_state_file(args.state_file)

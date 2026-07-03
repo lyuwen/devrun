@@ -170,6 +170,16 @@ class TestSWEBenchAgenticTask:
         extra = spec.resources.get("extra_sbatch", [])
         assert any("oversubscribe" in e for e in extra)
 
+    def test_prepare_no_hold_by_default(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params())
+        assert not spec.resources.get("hold", False)
+
+    def test_prepare_hold_opt_in(self):
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(hold=True))
+        assert spec.resources.get("hold") is True
+
     def test_prepare_task_id_format_in_command(self):
         task = SWEBenchAgenticTask()
         spec = task.prepare(_make_params(task_id_format="%04d"))
@@ -395,6 +405,82 @@ class TestInstancesAutoSharding:
         extra1 = specs[1].resources.get("extra_sbatch", [])
         assert any("0000-0049" in e for e in extra0)
         assert any("0050-0099" in e for e in extra1)
+
+    def test_prepare_script_args_in_command(self):
+        """script_args dict should appear as CLI arguments in command."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={
+                "batch_size": 32,
+                "temperature": 0.7,
+                "enable_cache": True,
+                "disable_logging": False,
+            }
+        ))
+        # Check that args appear in command
+        assert "--batch-size 32" in spec.command
+        assert "--temperature 0.7" in spec.command
+        assert "--enable-cache" in spec.command
+        # False values should be omitted
+        assert "--disable-logging" not in spec.command
+
+    def test_script_args_underscore_to_hyphen(self):
+        """Argument names with underscores should convert to hyphens."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={"batch_size": 16, "max_workers": 4}
+        ))
+        assert "--batch-size 16" in spec.command
+        assert "--max-workers 4" in spec.command
+        assert "batch_size" not in spec.command  # no underscores
+
+    def test_script_args_boolean_flags(self):
+        """True values should produce bare flags, False should be omitted."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={
+                "verbose": True,
+                "debug": True,
+                "quiet": False,
+            }
+        ))
+        assert "--verbose" in spec.command
+        assert "--debug" in spec.command
+        assert "--quiet" not in spec.command
+
+    def test_script_args_shell_quoting(self):
+        """Argument values with special chars should be shell-quoted."""
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            script_args={
+                "output_path": "/tmp/test dir/output",
+                "pattern": "*.py",
+            }
+        ))
+        # Values should be quoted
+        assert "'/tmp/test dir/output'" in spec.command or '"/tmp/test dir/output"' in spec.command
+        assert "'*.py'" in spec.command or '"*.py"' in spec.command
+
+    def test_script_args_empty_dict(self):
+        """Empty script_args should not affect command."""
+        task = SWEBenchAgenticTask()
+        spec_with_empty = task.prepare(_make_params(script_args={}))
+        spec_without = task.prepare(_make_params())
+        # Both should produce valid commands (no errors)
+        assert "python" in spec_with_empty.command
+        assert "python" in spec_without.command
+
+    def test_prepare_custom_template(self, tmp_path):
+        """Custom template parameter should override default template."""
+        # Create a minimal custom template
+        custom_template = tmp_path / "custom.sh.j2"
+        custom_template.write_text("echo 'CUSTOM_MARKER'\npython {{ script }}")
+
+        task = SWEBenchAgenticTask()
+        spec = task.prepare(_make_params(
+            template=str(custom_template)
+        ))
+        assert "CUSTOM_MARKER" in spec.command
 
     def test_instances_single(self):
         """1 instance → single spec with full array range."""
@@ -878,3 +964,104 @@ class TestConfigVariations:
             data = yaml.safe_load(f)
         assert data["params"]["run_infer_max_attempts"] == 5
         assert data["params"]["task_id_format"] == "%03d"
+
+
+class TestScriptArgsSubclassing:
+    """Tests for _get_script_args hook override pattern."""
+
+    def test_subclass_can_override_script_args(self):
+        """Subclass can override _get_script_args to provide custom arguments."""
+        from typing import Any
+
+        class CustomEvalTask(SWEBenchAgenticTask):
+            def _get_script_args(self, params: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "evaluator_mode": params.get("mode", "strict"),
+                    "enable_cache": True,
+                    "metrics": ",".join(params.get("metrics", ["accuracy"])),
+                }
+
+        task = CustomEvalTask()
+        spec = task.prepare(_make_params(
+            mode="lenient",
+            metrics=["f1", "recall"],
+        ))
+        assert "--evaluator-mode lenient" in spec.command
+        assert "--enable-cache" in spec.command
+        assert "--metrics f1,recall" in spec.command
+
+    def test_subclass_can_merge_params_and_defaults(self):
+        """Subclass can merge params.script_args with defaults."""
+        from typing import Any
+
+        class TaskWithDefaultArgs(SWEBenchAgenticTask):
+            def _get_script_args(self, params: dict[str, Any]) -> dict[str, Any]:
+                # Start with defaults
+                args = {"default_arg": "default_value"}
+                # Merge in params-level script_args if present
+                args.update(params.get("script_args", {}))
+                return args
+
+        task = TaskWithDefaultArgs()
+
+        # Without params override - gets defaults only
+        spec1 = task.prepare(_make_params())
+        assert "--default-arg default_value" in spec1.command
+
+        # With params override - defaults + overrides merged
+        spec2 = task.prepare(_make_params(
+            script_args={"custom_arg": "custom_value"}
+        ))
+        assert "--default-arg default_value" in spec2.command
+        assert "--custom-arg custom_value" in spec2.command
+
+        # With params override replacing default
+        spec3 = task.prepare(_make_params(
+            script_args={"default_arg": "overridden"}
+        ))
+        assert "--default-arg overridden" in spec3.command
+
+
+class TestJobIdsPatternExpansion:
+    """Tests for job_ids pattern expansion integration."""
+
+    def test_job_ids_pattern_expansion(self):
+        """job_ids with pattern should expand to multiple instances."""
+        task = SWEBenchAgenticTask()
+        specs = task.prepare_many(_make_params(
+            job_ids="job-[1-3]",
+            array="000-002"
+        ))
+        assert len(specs) == 3
+        # Check that JOB_ID env var is set correctly in each spec
+        assert "JOB_ID" in specs[0].env
+        assert specs[0].env["JOB_ID"] == "job-1"
+        assert specs[1].env["JOB_ID"] == "job-2"
+        assert specs[2].env["JOB_ID"] == "job-3"
+
+    def test_job_ids_mixed_pattern(self):
+        """job_ids with mixed ranges and lists."""
+        task = SWEBenchAgenticTask()
+        specs = task.prepare_many(_make_params(
+            job_ids="172.16.1.[157-159,161-163]",
+            array="000-005"
+        ))
+        assert len(specs) == 6
+        expected_ids = [
+            "172.16.1.157", "172.16.1.158", "172.16.1.159",
+            "172.16.1.161", "172.16.1.162", "172.16.1.163"
+        ]
+        for i, spec in enumerate(specs):
+            assert spec.env["JOB_ID"] == expected_ids[i]
+
+    def test_job_ids_backward_compatibility(self):
+        """Plain comma-separated job_ids still works."""
+        task = SWEBenchAgenticTask()
+        specs = task.prepare_many(_make_params(
+            job_ids="id1,id2,id3",
+            array="000-002"
+        ))
+        assert len(specs) == 3
+        assert specs[0].env["JOB_ID"] == "id1"
+        assert specs[1].env["JOB_ID"] == "id2"
+        assert specs[2].env["JOB_ID"] == "id3"

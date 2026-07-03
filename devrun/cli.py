@@ -145,6 +145,14 @@ def run(
         None, "--from-job",
         help="Import params from an existing job (e.g. swe_bench_collect --from-job <agentic_job_id>)",
     ),
+    after: list[str] = typer.Option(
+        [], "--after",
+        help="Wait for these job IDs to complete before submitting. Repeatable.",
+    ),
+    allow_failure_from: list[str] = typer.Option(
+        [], "--allow-failure-from",
+        help="Subset of --after jobs whose failure should not block this run. Repeatable.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
     help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
@@ -167,6 +175,12 @@ def run(
         raise typer.Exit(code=2)
 
     _setup_logging(verbose)
+
+    # Validate --allow-failure-from requires --after
+    if allow_failure_from and not after:
+        console.print("[red]Error:[/red] --allow-failure-from requires at least one --after parent.")
+        raise typer.Exit(code=1)
+
     runner = _runner()
 
     # Merge order: YAML base → from-job imported params → CLI trailing overrides.
@@ -190,6 +204,7 @@ def run(
             )
         except ValueError as exc:
             console.print(f"[red]Error:[/red] {exc}")
+            console.print("[dim]Hint: Use 'devrun history' to find a valid job id, or try -1 for most recent[/dim]")
             raise typer.Exit(code=1)
         console.print(
             f"[dim]From job {resolved_job_id} ({source_task}): {list(imported.keys())}[/dim]"
@@ -201,12 +216,31 @@ def run(
         overrides.extend(ctx.args)
 
     try:
-        job_ids = runner.run(target, overrides=overrides, dry_run=dry_run)
+        job_ids = runner.run(
+            target,
+            overrides=overrides,
+            dry_run=dry_run,
+            after=after,
+            allow_failure_from=set(allow_failure_from),
+        )
         if dry_run:
             console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
         else:
             for jid in job_ids:
-                console.print(f"[green]✓[/green] Job submitted: [bold]{jid}[/bold]")
+                console.print(f"[green]✓[/green] Job queued: [bold]{jid}[/bold]")
+            # Check if heartbeat service is running
+            try:
+                from devrun.services import get_service
+                service = get_service()
+                if not service.is_active():
+                    console.print("[yellow]⚠ Warning:[/yellow] Heartbeat scheduler is not running. Jobs will remain in QUEUED state.")
+                    console.print("  Start it with: [bold]devrun heartbeat start[/bold]")
+            except Exception:
+                # Silently skip warning if service check fails
+                pass
+    except ValueError as exc:
+        console.print(f"[red]✗ Error:[/red] {exc}")
+        raise typer.Exit(code=1)
     except Exception as exc:
         console.print(f"[red]✗ Error:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -264,36 +298,110 @@ def list_plugins() -> None:
     console.print(table)
 
 
+_STATUS_STYLES: dict[str, str] = {
+    "queued": "cyan",
+    "submitting": "yellow",
+    "submitted": "yellow",
+    "running": "yellow",
+    "completed": "green",
+    "failed": "red",
+    "canceling": "magenta",
+    "cancelled": "magenta",
+    "skipped": "dim",
+    "timed_out": "red",
+    "pending": "dim",
+    "unknown": "dim",
+}
+
+
+def _style_status(status: str) -> str:
+    """Return ``status`` wrapped in a Rich style tag for the table renderer.
+
+    Normalises ``"timed_out"`` to a human-friendly ``"timed out"`` so the
+    underscore doesn't trip the formatting expectations of the CLI tests.
+    """
+    label = status.replace("_", " ") if status == "timed_out" else status
+    style = _STATUS_STYLES.get(status, "")
+    return f"[{style}]{label}[/{style}]" if style else label
+
+
 @app.command()
 def status(
-    job_id: str = typer.Argument(..., help="Job ID to query"),
+    job_id: str = typer.Argument(..., help="Job ID to query (or ~1, ~2, etc. for recent jobs)"),
+    with_deps: bool = typer.Option(
+        False, "--with-deps", help="List parent job IDs and statuses for this job."
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Check the status of a submitted job."""
+    """Check the status of a submitted job (pure DB read).
+
+    Supports relative indexing with tilde: ~1 = most recent job, ~2 = second most recent, etc.
+
+    Examples:
+        devrun status abc123         # Query by job ID
+        devrun status ~1             # Query most recent job
+        devrun status ~3             # Query 3rd most recent job
+    """
     _setup_logging(verbose)
-    info = _runner().status(job_id)
+    runner = _runner()
+
+    # Resolve tilde index to actual job_id
+    if len(job_id) > 1 and job_id[0] == "~" and job_id[1:].isdigit():
+        n = int(job_id[1:])
+        if n < 1:
+            console.print(f"[red]Error:[/red] Index must be positive (got {job_id})")
+            raise typer.Exit(code=1)
+        recent = runner.history(limit=n)
+        if len(recent) < n:
+            console.print(f"[red]Error:[/red] Only {len(recent)} jobs in history, cannot resolve index {job_id}")
+            raise typer.Exit(code=1)
+        resolved_id = recent[n - 1]["job_id"]
+        console.print(f"[dim]Resolved {job_id} → {resolved_id}[/dim]")
+        job_id = resolved_id
+
+    info = runner.status(job_id)
     if "error" in info:
         console.print(f"[red]{info['error']}[/red]")
         raise typer.Exit(code=1)
-
-    # Format array progress into a readable string if present
-    if "progress" in info:
-        progress = info.pop("progress")
-        counts = progress.get("task_counts", {})
-        total = progress.get("total_tasks", 0)
-        display_order = ["completed", "running", "pending", "failed", "cancelled"]
-        parts = [f"{counts[k]} {k}" for k in display_order if counts.get(k)]
-        for key, value in sorted(counts.items()):
-            if key not in display_order and value:
-                parts.append(f"{value} {key}")
-        info["array_progress"] = f"{', '.join(parts)} (total: {total})"
 
     table = Table(title=f"Job {job_id}")
     table.add_column("Field", style="cyan")
     table.add_column("Value")
     for key, val in info.items():
-        table.add_row(key, str(val))
+        if key == "status":
+            table.add_row(key, _style_status(str(val)))
+        else:
+            table.add_row(key, str(val))
     console.print(table)
+
+    # Show why QUEUED jobs aren't progressing
+    from devrun.db.blocking_info import get_blocking_info
+    blocking = get_blocking_info(runner._db, job_id)
+    if blocking:
+        explanation = blocking.explain()
+        if blocking.is_blocked:
+            console.print(f"\n[yellow]⚠ Blocking reason:[/yellow]\n{explanation}")
+        else:
+            console.print(f"\n[dim]{explanation}[/dim]")
+
+    if with_deps:
+        deps = runner._db.list_dependencies(job_id)
+        deps_table = Table(title=f"Parents of {job_id}")
+        deps_table.add_column("Parent Job ID", style="bold")
+        deps_table.add_column("Status")
+        deps_table.add_column("allow_failure")
+        if not deps:
+            console.print("[dim]No parent dependencies.[/dim]")
+        else:
+            for dep in deps:
+                parent_rec = runner._db.get(dep.parent_job_id)
+                parent_status = parent_rec.status if parent_rec else "unknown"
+                deps_table.add_row(
+                    dep.parent_job_id,
+                    _style_status(str(parent_status)),
+                    "true" if dep.allow_failure else "false",
+                )
+            console.print(deps_table)
 
 
 @app.command()
@@ -328,17 +436,11 @@ def history(
     table.add_column("Created")
 
     for rec in records:
-        status_style = {
-            "completed": "green",
-            "failed": "red",
-            "running": "yellow",
-            "pending": "dim",
-        }.get(rec.get("status", ""), "")
         table.add_row(
             rec["job_id"],
             rec["task_name"],
             rec["executor"],
-            f"[{status_style}]{rec.get('status', 'unknown')}[/{status_style}]" if status_style else rec.get("status", "unknown"),
+            _style_status(str(rec.get("status", "unknown"))),
             rec.get("created_at", ""),
         )
 
@@ -474,6 +576,10 @@ def fetch(
 workflow_app = typer.Typer(name="workflow", help="Manage multi-stage workflows.", no_args_is_help=True)
 app.add_typer(workflow_app, name="workflow")
 
+from devrun.cli_heartbeat import heartbeat_app  # noqa: E402
+
+app.add_typer(heartbeat_app, name="heartbeat")
+
 
 def _show_workflow_help(target: str) -> None:
     """Show help for a specific workflow based on its configuration."""
@@ -592,7 +698,6 @@ def workflow_run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without submitting"),
     start_after: Optional[str] = typer.Option(None, "--start-after", help="Skip this stage and its dependencies, start from the next"),
     from_job: Optional[str] = typer.Option(None, "--from-job", help="Extract workflow params from an existing job"),
-    detach: bool = typer.Option(False, "--detach", "-d", help="Run workflow in background, return immediately"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     help: bool = typer.Option(False, "--help", "-h", help="Show this message and exit."),
 ) -> None:
@@ -616,6 +721,13 @@ def workflow_run(
         raise typer.Exit(code=2)
 
     _setup_logging(verbose)
+
+    # Validate --start-after requires --from-job
+    if start_after and not from_job:
+        console.print(
+            "[red]Error:[/red] --start-after requires --from-job to provide params for skipped stages."
+        )
+        raise typer.Exit(code=1)
 
     from omegaconf import OmegaConf
     from devrun.runner import find_configs
@@ -664,6 +776,7 @@ def workflow_run(
                 )
             except ValueError as exc:
                 console.print(f"[red]Error:[/red] {exc}")
+                console.print("[dim]Hint: Use 'devrun history' to find a valid job id, or try -1 for most recent[/dim]")
                 raise typer.Exit(code=1)
             from_job = resolved_job_id  # propagate resolved ID downstream
             if job_params:
@@ -722,31 +835,28 @@ def workflow_run(
                     skipped_params[source_stage] = record.params_dict
 
     try:
-        if detach:
-            if dry_run:
-                console.print("[red]Error:[/red] --detach and --dry-run cannot be used together.")
-                raise typer.Exit(code=1)
-            wf_id = runner.run_detached(
-                cfg,
-                start_after=start_after,
-                skipped_params=skipped_params or None,
-            )
-            console.print(
-                f"[green]Workflow {wf_id} started in background.[/green]\n"
-                f"Use [bold]devrun workflow status {wf_id}[/bold] to monitor."
-            )
+        result = runner.run(
+            cfg,
+            dry_run=dry_run,
+            start_after=start_after,
+            skipped_params=skipped_params or None,
+            from_job=from_job,
+        )
+        if dry_run:
+            console.print(result)
+            console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
         else:
-            result = runner.run(
-                cfg,
-                dry_run=dry_run,
-                start_after=start_after,
-                skipped_params=skipped_params or None,
-            )
-            if dry_run:
-                console.print(result)
-                console.print("[yellow]Dry-run complete. No jobs were submitted.[/yellow]")
-            else:
-                console.print(f"[green]Workflow completed:[/green] {result}")
+            console.print(f"[green]Workflow enqueued:[/green] {result}")
+            # Check if heartbeat service is running
+            try:
+                from devrun.services import get_service
+                service = get_service()
+                if not service.is_active():
+                    console.print("[yellow]⚠ Warning:[/yellow] Heartbeat scheduler is not running. Jobs will remain in QUEUED state.")
+                    console.print("  Start it with: [bold]devrun heartbeat start[/bold]")
+            except Exception:
+                # Silently skip warning if service check fails
+                pass
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -776,11 +886,31 @@ def workflow_status(
     table.add_row("Created", record["created_at"])
     table.add_row("Completed", record.get("completed_at") or "—")
 
-    stages = json.loads(record.get("stages_state", "{}"))
-    for name, state in stages.items():
-        status_str = state.get("status", "unknown")
-        job_id = state.get("job_id", "—")
-        table.add_row(f"  Stage: {name}", f"{status_str} (job: {job_id})")
+    # Read stage information from workflow_jobs table (producer model)
+    # Use the same database as the WorkflowRunner
+    stage_rows = runner._db.get_workflow_stages(workflow_id)
+
+    for stage_row in stage_rows:
+        if stage_row.job_id is None:
+            # Skipped stage (--from-job with --start-after)
+            table.add_row(
+                f"  Stage: {stage_row.stage_name}",
+                f"skipped (source: {stage_row.source_job_id or '—'})"
+            )
+        else:
+            # Regular stage with a job
+            job_record = runner._db.get(stage_row.job_id)
+            if job_record:
+                status_str = job_record.status.value if hasattr(job_record.status, 'value') else str(job_record.status)
+                table.add_row(
+                    f"  Stage: {stage_row.stage_name}",
+                    f"{status_str} (job: {stage_row.job_id})"
+                )
+            else:
+                table.add_row(
+                    f"  Stage: {stage_row.stage_name}",
+                    f"job not found (job: {stage_row.job_id})"
+                )
 
     console.print(table)
 
